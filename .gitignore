@@ -1,0 +1,4 @@
+ssl-conn-test*
+ref-count-test*
+certs
+*.o

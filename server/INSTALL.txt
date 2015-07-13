@@ -1,0 +1,46 @@
+$Id: INSTALL.txt,v 1.1 2012/02/27 17:58:32 akadams Exp $
+
+OVERVIEW
+
+The Geospatial Area and Information Analyzer (GAIA) is a visualization
+and analysis tool designed specifically to accommodate epidemiological
+research. GAIA is a web-service that allows epidemiology application
+developers the ability to create meaningful, rich visualizations of
+data.
+
+Currently, the GAIA web service (or server) resides at gaia.psc.edu
+and can be accessed via our default client (gaia-client).  To access
+the service, you must have the default GAIA client installed.
+
+
+INSTALLATION
+
+Download the GAIA software suite from <http://midas.psc.edu/>.
+
+Extract the GAIA software using:
+
+  mkdir gaia
+  tar -xzf gaia-latest.tar.gz gaia
+
+Build and install the components:
+
+  cd gaia
+  make
+  make install
+
+The gaia server includes an init.d script, so the daemon can be started automaticallly via the chkconfig and service commands.
+
+
+SERVER CONFIGURATIONS
+
+The server (gaiad) can be run with no options, with the default
+behavior consisting of:
+
+  GeoData database (-d): localhost (ipv4)
+  GeoData user (-u): gaia
+
+You can see a complete list of options by typing:
+
+  gaiad -h
+
+Alternatively, gaiad will also read a configuration file at startup via the "-c filename" option.  This file can contain a list of key, value pairs delimited by the "=" sign.  See samples/gaiad.conf for a complete list of configurable variables.
