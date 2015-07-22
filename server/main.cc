@@ -35,11 +35,14 @@ using namespace std;
 
 #define DEBUG_MUTEX_LOCK 0
 
+// Global variables.
+pthread_mutex_t request_list_lock;  // needs to be accessible in conga-procs
+
 // Static defaults.
 static const int kFramingType = MsgHdr::TYPE_HTTP;
 static const int kMaxPeers = 128;
 static const ssize_t kDefaultBufSize = TCPSESSION_DEFAULT_BUFSIZE;
-static const int auth_poll_interval = 86400;  // 24 hours
+static const int state_poll_interval = 86400;  // 24 hours
 const in_port_t kServerPort = CONGA_SERVER_PORT;
 
 
@@ -50,12 +53,16 @@ const in_port_t kServerPort = CONGA_SERVER_PORT;
 
 int main(int argc, char* argv[]) {
   ConfInfo conf_info;           // configuration information
+  list<RequestInfo> requests;   // flow requests currently active
   list<SSLSession> to_peers;    // initated connections (to other nodes)
+  //pthread_mutex_t to_peers_mtx = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_t to_peers_mtx;
   list<SSLSession> from_peers;  // received connections (from accept(2))
-  pthread_mutex_t to_peers_mtx = PTHREAD_MUTEX_INITIALIZER;
-  pthread_mutex_t from_peers_mtx = PTHREAD_MUTEX_INITIALIZER;
+  //pthread_mutex_t from_peers_mtx = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_t from_peers_mtx;
   vector<pthread_t> thread_list;  // list to keep track of all threads
-  pthread_mutex_t thread_list_mtx = PTHREAD_MUTEX_INITIALIZER;
+  //pthread_mutex_t thread_list_mtx = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_t thread_list_mtx;
   vector<SSLConn> servers;      // listen sockets, vector used to
                                 // handle multple listening ports (we
                                 // accept(2) or connect(2) to peers,
@@ -73,6 +80,10 @@ int main(int argc, char* argv[]) {
 
   logger.set_proc_name("conga");
 
+  pthread_mutex_init(&request_list_lock, NULL);
+  pthread_mutex_init(&to_peers_mtx, NULL);
+  pthread_mutex_init(&from_peers_mtx, NULL);
+  pthread_mutex_init(&thread_list_mtx, NULL);
 
   // Load "user" set-able global variables (ConfInfo) via command line.
   parse_command_line(argc, argv, &conf_info);
@@ -136,7 +147,7 @@ int main(int argc, char* argv[]) {
   // TODO(aka) Need to add daemonizing stuff.
 
   // Initialze more globals & externals: PRNG, signals
-  srandom(time(NULL));
+  srandom(time(NULL));  // TODO(aka) We really need to use srandomdev() here!
 
 #if 0
   sig_handler.Init();  // TODO(aka) need to add signal handling routines
@@ -183,7 +194,7 @@ int main(int argc, char* argv[]) {
   logger.Log(LOG_NOTICE, "conga (%s) starting on port %hu.", SERVER_VERSION, conf_info.port_);
 
   // Any work prior to the main event loop?
-  time_t auth_poll_timeout = time(NULL);
+  time_t state_poll_timeout = time(NULL);
 
   // Main event-loop.
   struct pollfd pollfds[SSL_EVENT_MAX_FDS];
@@ -245,13 +256,12 @@ int main(int argc, char* argv[]) {
         //logger.Log(LOG_INFO, "poll() timeout, continuing ...");
 
         time_t now = time(NULL);
-        if (auth_poll_timeout <= now) {
+        if (state_poll_timeout <= now) {
 #if 0
-          const string auth_db_host = "grants.psc.edu";
-          xxx;  // HTTPS?
+          const string ryu_host = "ryu.psc.edu";
           SSLSession tmp_session(MsgInfo::HTTP);
           tmp_session.Init();  // set aside buffer space
-          tmp_session.SSLConn::Init(ssl_context, auth_db_host.c_str(), AF_INET, 
+          tmp_session.SSLConn::Init(ssl_context, ryu_host.c_str(), AF_INET, 
                                     IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
           tmp_session.set_port(443);
           tmp_session.set_blocking();
@@ -259,65 +269,56 @@ int main(int argc, char* argv[]) {
           //tmp_session.set_handle(tmp_session.fd());  // for now, set it to the socket
           if (error.Event()) {
             logger.Log(LOG_ERR, "Failed to initialize peer %s:443: %s", 
-                       auth_db_host.c_str(), error.print().c_str());
+                       ryu_host.c_str(), error.print().c_str());
             error.clear();
             
-            auth_poll_timeout += auth_poll_interval;
+            state_poll_timeout += state_poll_interval;
             continue;
           }
 
           // Build a (HTTP) framing header and load the framing header into
-          // our TCPSession's MsgHdr list.
+          // our SSLSession's MsgHdr list.
 
-          URL auth_db_url;
-          auth_db_url.Init("https", auth_db_host.c_str(), 443, NULL, 0, NULL);
+          URL ryu_url;
+          ryu_url.Init("https", ryu_host.c_str(), 443, NULL, 0, NULL);
           HTTPFraming http_hdr;
-          http_hdr.InitRequest(HTTPFraming::GET, auth_db_url);
+          http_hdr.InitRequest(HTTPFraming::GET, ryu_url);
 
-          // Add HTTP content-type and content-length message-headers.
+          // Add HTTP content-length message-headers (for an empty message-body).
           struct rfc822_msg_hdr mime_msg_hdr;
-          //mime_msg_hdr.field_name = MIME_CONTENT_TYPE;
-          //mime_msg_hdr.field_value = MIME_TEXT_XML;
-
-          http_hdr.AppendMsgHdr(mime_msg_hdr);
-          param.key.clear();  // so we don't hose next msg-hdr
-          param.value.clear();
-
           mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
-          char tmp_buf[64];
-          snprintf(tmp_buf, 64, "%ld", strlen(msg.c_str())); 
-          mime_msg_hdr.field_value = tmp_buf;
+          mime_msg_hdr.field_value = "0";
           http_hdr.AppendMsgHdr(mime_msg_hdr);
 
           logger.Log(LOG_DEBUGGING, "main(): Generated HTTP headers:\n%s", http_hdr.print_hdr(0).c_str());
 
-            MsgHdr tmp_msg_hdr(MsgHdr::TYPE_HTTP);
-            tmp_msg_hdr.Init(++msg_id_hash, http_hdr);
+          MsgHdr tmp_msg_hdr(MsgHdr::TYPE_HTTP);
+          tmp_msg_hdr.Init(++msg_id_hash, http_hdr);
 
-            // Add our REQUEST message to our outgoing TCPSession list, and go
-            // back to wait for transmission in the event-loop.
+          // Add our REQUEST message to our outgoing TCPSession list, and go
+          // back to wait for transmission in the event-loop.
 
-            tmp_session.AddMsgBuf(http_hdr.print_hdr(0).c_str(), http_hdr.hdr_len(), 
-                                  msg.c_str(), strlen(msg.c_str()), tmp_msg_hdr);
+          tmp_session.AddMsgBuf(http_hdr.print_hdr(0).c_str(), http_hdr.hdr_len(), 
+                                msg.c_str(), strlen(msg.c_str()), tmp_msg_hdr);
 
-            logger.Log(LOG_VERBOSE, "Sending HTTP REQUEST \'%s\n%s\' to %s.", 
-                       http_hdr.print_start_line().c_str(), 
-                       http_hdr.print_msg_hdrs().c_str(), 
-                       tmp_session.SSLConn::print().c_str());
+          logger.Log(LOG_VERBOSE, "Sending HTTP REQUEST \'%s\n%s\' to %s.", 
+                     http_hdr.print_start_line().c_str(), 
+                     http_hdr.print_msg_hdrs().c_str(), 
+                     tmp_session.SSLConn::print().c_str());
 
 #if DEBUG_MUTEX_LOCK
-            warnx("main(timeout): requesting to_peers lock.");
+          warnx("main(timeout): requesting to_peers lock.");
 #endif
-            pthread_mutex_lock(&to_peers_mtx);
-            to_peers.push_back(tmp_session);
+          pthread_mutex_lock(&to_peers_mtx);
+          to_peers.push_back(tmp_session);
 #if DEBUG_MUTEX_LOCK
-            warnx("main(timeout): releasing to_peers lock.");
+          warnx("main(timeout): releasing to_peers lock.");
 #endif
-            pthread_mutex_unlock(&to_peers_mtx);
-          }
+          pthread_mutex_unlock(&to_peers_mtx);
+        }
 #endif
-          auth_poll_timeout += auth_poll_interval;
-        }  // if (auth_poll_timeout <= now) {
+        state_poll_timeout += state_poll_interval;
+        }  // if (state_poll_timeout <= now) {
 
         // If any of our *read* data in from_peers is complete, process it ...
 #if DEBUG_MUTEX_LOCK
@@ -359,7 +360,7 @@ int main(int argc, char* argv[]) {
                 !from_peer->IsIncomingMsgBeingProcessed()) {
               // Build struct for function arguments.
               struct conga_incoming_msg_args args = {
-                &conf_info, from_peer, from_peers.end(), 
+                &conf_info, &requests, to_peers, from_peer, from_peers.end(), 
                 &thread_list, &thread_list_mtx,
               };
 
@@ -519,11 +520,11 @@ int main(int argc, char* argv[]) {
               continue;  // head back to while()
             }
 
-            // Note, since we expect that to_peers is only used by a
-            // client (sender) process, we don't bother
-            // multi-threading the message processing.  Moreover, the
-            // client actually calls exit(3) in conga-procs.cc (so we
-            // never return from it!).
+            // TODO(aka) Note, we currently process all *initiated*
+            // connections within conga-procs as sequential, blocking
+            // processes.  When we decide to move away from that,
+            // we'll need to setup our multi-threading processing here
+            // (as we did with from_peers).
 
             // Process message single threaded.
             conga_process_incoming_msg(&conf_info, to_peer);

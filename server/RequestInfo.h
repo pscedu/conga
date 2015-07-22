@@ -29,6 +29,7 @@ class RequestInfo {
 
   // Server data members (and possibly used on client, as well).
   string peer_;              // who requested this plot
+  uint16_t msg_hdr_id_;         // link to message (socket) in either to_peers or from_peers
   bool wsdl_request_;        // flag to show that REQUEST expects WSDL service
 
   // Details.
@@ -36,6 +37,7 @@ class RequestInfo {
   string allocation_id_;
   string user_id_;
   string project_id_;
+  string resource_id_;
   int bandwidth_;
   int start_time_;
   int end_time_;
@@ -50,6 +52,7 @@ class RequestInfo {
 
   // Constructor & destructor.
   RequestInfo(void) {
+    msg_hdr_id_ = 0;
     wsdl_request_ = false;
   }
 

@@ -23,6 +23,8 @@ using namespace std;
 
 struct conga_incoming_msg_args {
   ConfInfo* info;
+  list<RequestInfo>* requests;
+  list<SSLSession>* to_peers;
   list<SSLSession>::iterator peer;
   list<SSLSession>::iterator peer_end;
   vector<pthread_t>* thread_list;
@@ -31,7 +33,7 @@ struct conga_incoming_msg_args {
 
 const char kCONGAMsgDelimiter = ':';
 
-bool conga_process_incoming_msg(ConfInfo* info, list<SSLSession>::iterator peer);
+bool conga_process_incoming_msg(ConfInfo* info, list<RequestInfo>* requests, list<SSLSession>::iterator peer);
 void* conga_concurrent_process_incoming_msg(void* args);
 void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                            const string& msg_body, const File& msg_data,
@@ -39,7 +41,7 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                            list<MsgHdr>::iterator req_hdr);
 void conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                              const string& msg_body, const File& msg_data,
-                             RequestInfo* request_info);
+                             list<RequestInfo>* requests);
 void conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& http_hdr,
                                    const string& msg_body, const File& msg_data,
                                    RequestInfo* request_info);

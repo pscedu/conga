@@ -48,13 +48,16 @@ using namespace xercesc;
 
 #define DEBUG_NETWORKING 0
 #define DEBUG_XML 0
+#define DEBUG_MUTEX_LOCK 0
 
 static const char* kServiceAllocations = "api/allocations";
 static const char* kServiceAuth = "api/auth";
+static const char* kServiceDancesAuth = "api/v1/dances";
 
 static const char* kDetailAPIKey = "api_key";
 static const char* kDetailUserID = "user_id";
 static const char* kDetailProjectID = "project_id";
+static const char* kDetailResourceID = "resource_id";
 static const char* kDetailAllocationID = "allocation_id";
 //static const char* kDetailRequestID = "request_id";
 //static const char* kDetailExpiresIn = "expires_in";
@@ -70,6 +73,8 @@ static const char* kDetailEndTime = "end_time";
 static const char* kDetailDuration = "duration";
 static const char* kDetailBandwidth = "bandwidth";
 
+static const char* kDetailIsActive = "is_active";
+
 
 // Routine to process a ready (incoming) message in our SSLSession
 // object.  This routine must deal with both the message framing *and*
@@ -77,7 +82,7 @@ static const char* kDetailBandwidth = "bandwidth";
 // processing).
 //
 // This routine can set an ErrorHandler event.
-bool conga_process_incoming_msg(ConfInfo* info, 
+bool conga_process_incoming_msg(ConfInfo* info, list<RequestInfo>* requests,
                                 list<SSLSession>::iterator peer) {
   if (&(*peer) == NULL) {  // note iterator hack
     error.Init(EX_SOFTWARE, "conga_process_incoming_msg(): peer is NULL");
@@ -86,12 +91,12 @@ bool conga_process_incoming_msg(ConfInfo* info,
 
   try {  // for debugging
 
-    //logger.Log(LOG_DEBUGGING, "conga_process_incoming_msg(): Working with header: %s.", peer->rhdr().print().c_str());
+    //logger.Log(LOG_DEBUG, "conga_process_incoming_msg(): Working with header: %s.", peer->rhdr().print().c_str());
 
     // First, make a copy of the incoming msg and remove the *original*
     // data from the SSLSession (i.e., either rbuf_ or rfile_ (along
     // with rhdr_)).  We *trade-off* the cost of the buffer copy in-order
-    // for us to multi-thread different messages within the SSLSession,
+    // for us to multi-thread different messages within the same SSLSession,
     // i.e., we need to clear out the incoming message ASAP!
 
     const MsgHdr msg_hdr = peer->rhdr();
@@ -102,7 +107,7 @@ bool conga_process_incoming_msg(ConfInfo* info,
     else
       msg_body.assign(peer->rbuf(), peer->rhdr().body_len());
 
-    //logger.Log(LOG_DEBUGGING, "conga_process_incoming_msg(): Cleaning %ld byte msg-body for request (%s)/response (%s) from peer %s.", peer->rhdr().msg_len(), req_hdr->print_hdr(0).c_str(), peer->rhdr().print_hdr(0).c_str(), peer->print().c_str());
+    //logger.Log(LOG_DEBUG, "conga_process_incoming_msg(): Cleaning %ld byte msg-body for request (%s)/response (%s) from peer %s.", peer->rhdr().msg_len(), req_hdr->print_hdr(0).c_str(), peer->rhdr().print_hdr(0).c_str(), peer->print().c_str());
 
     peer->ClearIncomingMsg();  // remove *now copied* message from peer
 
@@ -191,7 +196,7 @@ bool conga_process_incoming_msg(ConfInfo* info,
 
       if (peer->rbuf_len() || peer->IsOutgoingDataPending() ||
           peer->whdrs().size()) {
-        logger.Log(LOG_VERBOSE, "conga_process_incoming_msg(): "
+        logger.Log(LOG_INFO, "conga_process_incoming_msg(): "
                    "peer (%s) still has %ld bytes in rbuf, or "
                    "%d messages in wpending, or %d REQUEST headers left, "
                    "so not removing from queue.", 
@@ -365,7 +370,7 @@ void* conga_concurrent_process_incoming_msg(void* ptr) {
              pthread_self(), args->peer->hostname().c_str());
 
   // Process the *complete* message.
-  conga_process_incoming_msg(args->info, args->peer);
+  conga_process_incoming_msg(args->info, args->requests, args->peer);
   if (error.Event()) {
     logger.Log(LOG_ERR, "conga_concurrent_process_incoming_msg(): "
                "Thread %d failed to process REQUEST from %s: %s.", 
@@ -413,7 +418,7 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
   if (msg_hdr.http_hdr().status_code() == 200) {
     // If we have a file, report its successful return.
     if (msg_data.Exists(NULL) && msg_data.size(NULL) > 0)
-      logger.Log(LOG_NORMAL, "Received RESPONSE \'%d %s\' with file: %s, "
+      logger.Log(LOG_NOTICE, "Received RESPONSE \'%d %s\' with file: %s, "
                  "from %s for REQUEST: %s.", 
                  msg_hdr.http_hdr().status_code(), 
                  status_code_phrase(msg_hdr.http_hdr().status_code()),
@@ -421,7 +426,7 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                  peer->TCPConn::print().c_str(), 
                  req_hdr->http_hdr().print_start_line().c_str());
     else
-      logger.Log(LOG_NORMAL, 
+      logger.Log(LOG_NOTICE, 
                  "Received RESPONSE \'%d %s\' from %s for REQUEST: %s.", 
                  msg_hdr.http_hdr().status_code(), 
                  status_code_phrase(msg_hdr.http_hdr().status_code()),
@@ -429,7 +434,7 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                  req_hdr->http_hdr().print_start_line().c_str());
   } else {
     if (msg_body.size() > 0)
-      logger.Log(LOG_NORMAL, 
+      logger.Log(LOG_NOTICE, 
                  "Received ERROR response \'%d %s\' from %s for REQUEST: %s: %s.",
                  msg_hdr.http_hdr().status_code(), 
                  status_code_phrase(msg_hdr.http_hdr().status_code()),
@@ -437,7 +442,7 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                  req_hdr->http_hdr().print_hdr(0).c_str(),
                  msg_body.c_str());
     else
-      logger.Log(LOG_NORMAL, 
+      logger.Log(LOG_NOTICE, 
                  "Received ERROR response \'%d %s\' from %s for REQUEST: %s.",
                  msg_hdr.http_hdr().status_code(), 
                  status_code_phrase(msg_hdr.http_hdr().status_code()),
@@ -675,26 +680,8 @@ void conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& htt
 
 void conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                              const string& msg_body, const File& msg_data,
-                             RequestInfo* request_info) {
+                             list<RequestInfo>* requests) {
   URL url = http_hdr.uri();
-
-  // TODO(aka) This will change if key is passed in message-headers!
-
-  // Get the api_key if the user specified one in the RESTful request.
-  list<struct url_query_info> queries = url.query();
-  list<struct url_query_info>::iterator itr = queries.begin();
-  while (itr != queries.end()) {
-    string key = itr->key;
-    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-    if (!key.compare(kDetailAPIKey)) {
-      request_info->api_key_ = itr->value;
-    } else {
-      logger.Log(LOG_WARN, "conga_process_post_auth(): Received unknown query: %s=%s.",
-                 key.c_str(), itr->value.c_str());
-    }
-
-    itr++;
-  }
 
   // Parse JSON message-body.
   rapidjson::Document details;
@@ -704,29 +691,327 @@ void conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
     return;
   }
 
-  if (request_info->api_key_.size() > 0) {
-    // TODO(aka) As of right now, I can't see a differenece in the API
-    // doc regarding the difference in behavior between having the API
-    // key and not having it ...
+  if (!details.HasMember(kDetailUserID) || !details[kDetailUserID].IsString() ||
+      !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString() ||
+      !details.HasMember(kDetailResourceID) || !details[kDetailResourceID].IsString()) {
+    error.Init(EX_DATAERR, "conga_process_post_auth(): "
+               "%s, %s or %s is invalid: %s", 
+               kDetailUserID, kDetailProjectID, kDetailResourceID, msg_body.c_str());
+    return;
+  }
+
+
+  logger.Log(LOG_DEBUG, "conga_process_post_auth(): "
+             "working on user: %s, project: %s, resource: %s.",
+             details[kDetailUserID].GetString(), 
+             details[kDetailProjectID].GetString(),
+             details[kDetailResourceID].GetString());
+
+  // See if user is an authorized user.
+
+  // Setup SSL connection.
+  const string auth_db_host = "dirsdev.psc.edu";
+  SSLSession tmp_session(MsgInfo::HTTP);
+  tmp_session.Init();  // set aside buffer space
+  tmp_session.SSLConn::Init(ssl_context, auth_db_host.c_str(), AF_INET, 
+                            IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
+  tmp_session.set_port(443);
+  tmp_session.set_blocking();
+  tmp_session.Socket(PF_INET, SOCK_STREAM, 0);
+  //tmp_session.set_handle(tmp_session.fd());  // for now, set it to the socket
+  if (error.Event()) {
+    error.AppendMsg("conga_process_post_auth(): ");
+    return;
+  }
+
+  // Build a (HTTP) framing header and load the framing header into
+  // our TCPSession's MsgHdr list.
+  //
+  // example: https://dirsdev.psc.edu/dances/api/v1/resource/blacklight.psc.teragrid/username/akadams/grant_number/TG-MCB110157
+
+  URL auth_db_url;
+  char tmp_buf[1024];
+  snprintf(tmp_buf, 1024, "%s/resource/%s/username/%s/grant_number/%s",
+           kServiceDancesAuth, details[kDetailResourceID].GetString(),
+           details[kDetailUserID].GetString(), details[kDetailProjectID].GetString());
+  auth_db_url.Init("https", auth_db_host.c_str(), 443, tmp_buf, strlen(tmp_buf), NULL);
+  HTTPFraming http_hdr;
+  http_hdr.InitRequest(HTTPFraming::GET, auth_db_url);
+
+  // Add HTTP content-length message-headers (for an empty message-body).
+  struct rfc822_msg_hdr mime_msg_hdr;
+  mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
+  mime_msg_hdr.field_value = "0";
+  http_hdr.AppendMsgHdr(mime_msg_hdr);
+
+  logger.Log(LOG_DEBUG, "conga_process_post_auth(): Generated HTTP headers:\n%s", http_hdr.print_hdr(0).c_str());
+
+  MsgHdr tmp_msg_hdr(MsgHdr::TYPE_HTTP);
+  tmp_msg_hdr.Init(++msg_id_hash, http_hdr);
+  tmp_session.AddMsgBuf(http_hdr.print_hdr(0).c_str(), http_hdr.hdr_len(), 
+                        "", 0, tmp_msg_hdr);
+
+  // HACK: Normally, we would add our REQUEST message to our
+  // outgoing TCPSession list (to_peers), and then go back to wait
+  // for transmission in the event-loop, processing the results in
+  // conga_process_response().  However, doing that would require us
+  // to (i) pass to_peers, from_peers & list<RequestInfo> into
+  // *_process_incoming_msg(), and (ii) be able to associate the
+  // RequestInfo between the two SSL lists (which could be done via
+  // the MsgHdr msg_id!).  So, for now, we're just going to
+  // sequentially turn around and ask the auth server for a response
+  // in here.
+
+  logger.Log(LOG_INFO, "Sending HTTP REQUEST \'%s\n%s\' to %s.", 
+             http_hdr.print_start_line().c_str(), 
+             http_hdr.print_msg_hdrs().c_str(), 
+             tmp_session.SSLConn::print().c_str());
+
+  // Okay, try and connect, then send out our request.
+  tmp_session.Connect();
+  tmp_session.Write();
+  if (error.Event()) {
+    error.AppendMsg("conga_process_post_auth(): ");
+    return;
+  }
+
+  // If we made it here, hang around to get our response ...
+  bool eof = false;
+  ssize_t bytes_read = 0;
+  bytes_read = tmp_session.Read(&eof);
+  if (error.Event()) {
+    error.AppendMsg("conga_process_post_auth(): ");
+    return;
+  }
+
+  tmp_session.Close();
+
+  logger.Log(LOG_DEBUG, "conga_process_post_auth(): Read %ld byte(s) from %s, rbuf_len: %ld, eof: %d.", bytes_read, tmp_session.hostname().c_str(), tmp_session.rbuf_len(), eof);
+
+  // Parse JSON message-body.
+  rapidjson::Document response;
+  if (response.Parse(tmp_session.rbuf()).HasParseError()) {
+    error.Init(EX_DATAERR, "conga_process_post_auth(): Failed to parse JSON from %s: %s",
+               tmp_session.hostname().c_str(), tmp_session.rbuf());
+    return;
+  }
+
+  if (!respone.HasMember(kDetailIsActive) || !response[kDetailIsActive].IsBool()) {
+    error.Init(EX_DATAERR, "conga_process_post_auth(): %s is invalid: %s", 
+               kDetailIsActive, tmp_session.rbuf());
+    return;
+  }
+
+  if (!response[kDetailIsActive].GetBool()) {
+    error.Init(EX_DATAERR, "conga_process_post_auth(): "
+               "Authorization failure with request %s", auth_db_url.print().c_str());
+    return;
+  }
+
+  // Build POST AUTH results, depending on whether this is a new
+  // request, or the user has an existing api-key.
+
+#if DEBUG_MUTEX_LOCK
+  warnx("conga_process_post_auth: requesting request list lock.");
+#endif
+  pthread_mutex_lock(&request_list_lock);
+  requests->push_back(new_request);
+#if DEBUG_MUTEX_LOCK
+  warnx("conga_process_post_auth: releasing request list lock.");
+#endif
+  pthread_mutex_unlock(&request_list_lock);
+
+  if (details.HasMember(kDetailAPIKey) && details[kDetailAPIKey].IsString()) {
+    // TODO(aka) Not sure if we should look up the key in our list<RequestInfo> or what?
+    request_info->api_key_ = details[kDetailAPIKey].getString();
+  } else {
+    request_info->api_key_ = gen_random_string(kAPIKeySize);
+  }
+
+  request_info->user_id_ = details[kDetailUserID].GetString();
+  request_info->project_id_ = details[kDetailProjectID].GetString();
+  request_info->resource_id_ = details[kDetailResourceID].GetString();
+  request_info->msg_hdr_id_ = msg_id_hash;
+
+
+  request_info->start_time_ = time(NULL);
+  int duration = 900;  // 15 mins
+  request_info->end_time_ = request_info->start_time_ + duration;
+  int status = 0;
+  string state = "running";
+
+  string results(1024, '\0');
+  snprintf((char*)results.c_str(), 1023, "{ \"status\":%d, \"results\": [ { "
+           "\"%s\":\"%s\", "
+           "\"%s\": %d, \"%s\": %d, "
+           "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
+           "} ] }", 
+           status, kDetailAPIKey, request_info->api_key_.c_str(), 
+           kDetailStartTime, request_info->start_time_, 
+           kDetailEndTime, request_info->end_time_,
+           kDetailUserID, request_info->user_id_.c_str(),
+           kDetailProjectID, request_info->project_id_.c_str(),
+           kDetailResourceID, request_info->resource_id_.c_str());
+  request_info->results_ = results;
+
+  logger.Log(LOG_NOTICE, "Processed POST auth (%s:%s, %s:%s, %s:%s) from %s.",
+             kDetailUserID, request_info->user_id_.c_str(),
+             kDetailProjectID, request_info->project_id_.c_str(),
+             kDetailResourceID, request_info->resource_id_.c_str(),
+             request_info->peer_.c_str());
+
+  // Head back to conga_process_incoming_msg() to send RESPONSE out.
+}
+
+void conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
+                             const string& msg_body, const File& msg_data,
+                             RequestInfo* request_info) {
+  URL url = http_hdr.uri();
+
+  // Get the api_key.
+  list<struct url_query_info> queries = url.query();
+  list<struct url_query_info>::iterator itr = queries.begin();
+  while (itr != queries.end()) {
+    string key = itr->key;
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    if (!key.compare(kDetailAPIKey)) {
+      request_info->api_key_ = itr->value;
+    } else {
+      logger.Log(LOG_WARN, "conga_process_get_auth(): Received unknown query: %s=%s.",
+                 key.c_str(), itr->value.c_str());
+    }
+
+    itr++;
+  }
+
+  // Parse JSON message-body.
+  rapidjson::Document details;
+  if (details.Parse(msg_body.c_str()).HasParseError()) {
+    error.Init(EX_DATAERR, "conga_process_get_auth(): "
+               "Failed to parse JSON: %s", msg_body.c_str());
+    return;
+  }
 
     if (!details.HasMember(kDetailUserID) || !details[kDetailUserID].IsString() ||
         !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString()) {
-      error.Init(EX_DATAERR, "conga_process_post_auth(): "
+      error.Init(EX_DATAERR, "conga_process_get_auth(): "
                  "%s or %s is invalid: %s", 
                  kDetailUserID, kDetailProjectID, msg_body.c_str());
       return;
     }
 
 
-    logger.Log(LOG_DEBUG, "conga_process_post_auth(): working on user %s, project: %s.",
+    logger.Log(LOG_DEBUG, "conga_process_get_auth(): working on user %s, project: %s.",
                details[kDetailUserID].GetString(), 
                details[kDetailProjectID].GetString());
 
     request_info->user_id_ = details[kDetailUserID].GetString();
     request_info->project_id_ = details[kDetailProjectID].GetString();
 
-    // Get the token ...
-    logger.Log(LOG_EMERG, "conga_process_post_auth(): TODO(aka) Add call to auth db!");
+    // See if user is an authorized user.
+
+    // Setup SSL connection.
+    const string auth_db_host = "dirsdev.psc.edu";
+    SSLSession tmp_session(MsgInfo::HTTP);
+    tmp_session.Init();  // set aside buffer space
+    tmp_session.SSLConn::Init(ssl_context, auth_db_host.c_str(), AF_INET, 
+                              IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
+    tmp_session.set_port(443);
+    tmp_session.set_blocking();
+    tmp_session.Socket(PF_INET, SOCK_STREAM, 0);
+    //tmp_session.set_handle(tmp_session.fd());  // for now, set it to the socket
+    if (error.Event()) {
+      error.AppendMsg("conga_process_get_auth(): ");
+      return;
+    }
+
+    // Build a (HTTP) framing header and load the framing header into
+    // our TCPSession's MsgHdr list.
+
+    URL auth_db_url;
+    auth_db_url.Init("https", auth_db_host.c_str(), 443, NULL, 0, NULL);
+    HTTPFraming http_hdr;
+    http_hdr.InitRequest(HTTPFraming::GET, auth_db_url);
+
+    // Add HTTP content-length message-headers (for an empty message-body).
+    struct rfc822_msg_hdr mime_msg_hdr;
+    mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
+    mime_msg_hdr.field_value = "0";
+    http_hdr.AppendMsgHdr(mime_msg_hdr);
+
+    logger.Log(LOG_DEBUG, "conga_process_get_auth(): Generated HTTP headers:\n%s", http_hdr.print_hdr(0).c_str());
+
+    MsgHdr tmp_msg_hdr(MsgHdr::TYPE_HTTP);
+    tmp_msg_hdr.Init(++msg_id_hash, http_hdr);
+    request_info->msg_hdr_id_ = msg_id_hash;
+
+    tmp_session.AddMsgBuf(http_hdr.print_hdr(0).c_str(), http_hdr.hdr_len(), 
+                          "", 0, tmp_msg_hdr);
+
+    // HACK: Normally, we would add our REQUEST message to our
+    // outgoing TCPSession list (to_peers), and then go back to wait
+    // for transmission in the event-loop, processing the results in
+    // conga_process_response().  However, doing that would require us
+    // to (i) pass to_peers, from_peers & list<RequestInfo> into
+    // *_process_incoming_msg(), and (ii) be able to associate the
+    // RequestInfo between the two SSL lists (which could be done via
+    // the MsgHdr msg_id!).  So, for now, we're just going to
+    // sequentially turn around and ask the auth server for a response
+    // in here.
+
+    logger.Log(LOG_INFO, "Sending HTTP REQUEST \'%s\n%s\' to %s.", 
+               http_hdr.print_start_line().c_str(), 
+               http_hdr.print_msg_hdrs().c_str(), 
+               tmp_session.SSLConn::print().c_str());
+
+    // Okay, try and connect, then send out our request.
+    tmp_session.Connect();
+    tmp_session.Write();
+    if (error.Event()) {
+      error.AppendMsg("conga_process_get_auth(): ");
+      return;
+    }
+
+    // If we made it here, hang around to get our response ...
+    bool eof = false;
+    ssize_t bytes_read = 0;
+    bytes_read = tmp_session.Read(&eof);
+    if (error.Event()) {
+      error.AppendMsg("conga_process_get_auth(): ");
+      return;
+    }
+
+    tmp_session.Close();
+
+    logger.Log(LOG_DEBUG, "conga_process_get_auth(): Read %ld byte(s) from %s, rbuf_len: %ld, eof: %d.", bytes_read, peer->hostname().c_str(), peer->rbuf_len(), eof);
+
+    xxx;
+  // Parse JSON message-body.
+  rapidjson::Document details;
+  if (details.Parse(msg_body.c_str()).HasParseError()) {
+    error.Init(EX_DATAERR, "conga_process_get_auth(): "
+               "Failed to parse JSON: %s", msg_body.c_str());
+    return;
+  }
+
+    if (!details.HasMember(kDetailUserID) || !details[kDetailUserID].IsString() ||
+        !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString()) {
+      error.Init(EX_DATAERR, "conga_process_get_auth(): "
+                 "%s or %s is invalid: %s", 
+                 kDetailUserID, kDetailProjectID, msg_body.c_str());
+      return;
+    }
+
+
+    logger.Log(LOG_DEBUG, "conga_process_get_auth(): working on user %s, project: %s.",
+               details[kDetailUserID].GetString(), 
+               details[kDetailProjectID].GetString());
+
+    request_info->user_id_ = details[kDetailUserID].GetString();
+    request_info->project_id_ = details[kDetailProjectID].GetString();
+
+
+    logger.Log(LOG_EMERG, "conga_process_get_auth(): TODO(aka) Add call to auth db!");
 
     request_info->api_key_ = "FooBarKey";
     request_info->start_time_ = time(NULL);
@@ -753,51 +1038,6 @@ void conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                kDetailUserID, request_info->user_id_.c_str(),
                kDetailProjectID, request_info->project_id_.c_str(),
                request_info->peer_.c_str());
-  } else {
-    if (!details.HasMember(kDetailUserID) || !details[kDetailUserID].IsString() ||
-        !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString()) {
-      error.Init(EX_DATAERR, "conga_process_post_auth(): "
-                 "%s or %s is invalid: %s", 
-                 kDetailUserID, kDetailProjectID, msg_body.c_str());
-      return;
-    }
-
-
-    logger.Log(LOG_DEBUG, "conga_process_post_auth(): working on user %s, project: %s.",
-               details[kDetailUserID].GetString(), 
-               details[kDetailProjectID].GetString());
-
-    request_info->user_id_ = details[kDetailUserID].GetString();
-    request_info->project_id_ = details[kDetailProjectID].GetString();
-
-    // Get the token ...
-    logger.Log(LOG_EMERG, "conga_process_post_auth(): TODO(aka) Add call to auth db!");
-
-    request_info->api_key_ = "FooBarKey";
-    request_info->start_time_ = time(NULL);
-    int duration = 900;  // 15 mins
-    request_info->end_time_ = request_info->start_time_ + duration;
-    int status = 0;
-    string state = "running";
-
-    string results(1024, '\0');
-    snprintf((char*)results.c_str(), 1023, "{ \"status\":%d, \"results\": [ { "
-             "\"%s\":\"%s\", "
-             "\"%s\": %d, \"%s\": %d, "
-             "\"%s\":\"%s\", \"%s\":\"%s\", "
-             "} ] }", 
-             status, kDetailAPIKey, request_info->api_key_.c_str(), 
-             kDetailStartTime, request_info->start_time_, 
-             kDetailEndTime, request_info->end_time_,
-             kDetailUserID, request_info->user_id_.c_str(),
-             kDetailProjectID, request_info->project_id_.c_str());
-    request_info->results_ = results;
-
-    logger.Log(LOG_NOTICE, "Processed POST auth (%s:%s, %s:%s) from %s.",
-               kDetailUserID, request_info->user_id_.c_str(),
-               kDetailProjectID, request_info->project_id_.c_str(),
-               request_info->peer_.c_str());
-  }
 
   // Head back to conga_process_incoming_msg() to send RESPONSE out.
 }
@@ -973,7 +1213,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
 #if DEBUG_XML
     // For Debugging:
-    logger.Log(LOG_NORMAL, "conga_parse_xml(): xml_msg: %s.", xml_msg.c_str());
+    logger.Log(LOG_NOTICE, "conga_parse_xml(): xml_msg: %s.", xml_msg.c_str());
 #endif
 
     // Setup a Load/Save input and the input source (our memory
@@ -1015,7 +1255,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
            (int)(end_xerces_time.tv_usec/1000000.0)) - 
           (start_xerces_time.tv_sec + 
            (int)(start_xerces_time.tv_usec/1000000.0));
-      // XXX logger.Log(LOG_NORMAL, "conga_parse_xml(): PROFILING XML message parsed by Xerces-c in %ds.", time_xerces_diff);
+      // XXX logger.Log(LOG_NOTICE, "conga_parse_xml(): PROFILING XML message parsed by Xerces-c in %ds.", time_xerces_diff);
 
       // For PROFILING:
       struct timeval start_internal_time;
@@ -1053,7 +1293,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
                        1024 - strlen(tmp_str.c_str()), ", ");
           }
         }
-        logger.Log(LOG_NORMAL, "DEBUG: XML doc has %d children: %s.", 
+        logger.Log(LOG_NOTICE, "DEBUG: XML doc has %d children: %s.", 
                    num_children, tmp_str.c_str());
       }
 #endif
@@ -1062,7 +1302,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
       for (XMLSize_t i = 0; i < num_children; i++) {
         DOMNode* child = children->item(i);
         if (child == NULL || child->getNodeType() != DOMNode::ELEMENT_NODE) {
-          logger.Log(LOG_DEBUGGING, "conga_parse_xml(): TOOD(aka) "
+          logger.Log(LOG_DEBUG, "conga_parse_xml(): TOOD(aka) "
                      "node either NULL or not an ELEMENT_NODE.");
           continue;
         }
@@ -1100,7 +1340,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->output_format_ = child_value;
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): output-format: %s.", child_value);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): output-format: %s.", child_value);
         } else if (!strncasecmp("bundle-format", child_name, 
                                 strlen("bundle-format"))) {
           DOMNode* value = child->getFirstChild();
@@ -1131,7 +1371,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->num_gradients_ = atoi(child_value);
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): num-gradients: %s.", child_value);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): num-gradients: %s.", child_value);
         } else if (!strncasecmp("max-resolution", child_name, 
                                 strlen("max-resolution"))) {
           DOMNode* value = child->getFirstChild();
@@ -1144,7 +1384,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->max_resolution_ = atof(child_value);
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): max-resolution: %s.", child_value);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): max-resolution: %s.", child_value);
         } else if (!strncasecmp("start-color", child_name, 
                                 strlen("start-color"))) {
           DOMNode* value = child->getFirstChild();
@@ -1157,7 +1397,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->start_color_ = child_value;
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): start-color: %s.", child_value);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): start-color: %s.", child_value);
         } else if (!strncasecmp("end-color", child_name, 
                                 strlen("end-color"))) {
           DOMNode* value = child->getFirstChild();
@@ -1170,7 +1410,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->end_color_ = child_value;
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): end-color: %s.", child_value);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): end-color: %s.", child_value);
         } else if (!strncasecmp("start-radius", child_name, 
                                 strlen("start-radius"))) {
           DOMNode* value = child->getFirstChild();
@@ -1183,7 +1423,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->start_radius_ = atof(child_value);
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): start-radius: %s.", child_value);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): start-radius: %s.", child_value);
         } else if (!strncasecmp("end-radius", child_name, 
                                 strlen("end-radius"))) {
           DOMNode* value = child->getFirstChild();
@@ -1196,7 +1436,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->end_radius_ = atof(child_value);
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): end-radius: %s.", child_value);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): end-radius: %s.", child_value);
         } else if (!strncasecmp("project-image", child_name, 
                                 strlen("project-image"))) {
           // The presence of the element implies a value of *true*.
@@ -1229,7 +1469,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->font_type_ = child_value;
-          //logger.Log(LOG_VERBOSE, "conga_parse_xml(): setting font-type to: %s.", request_info->font_type_.c_str());
+          //logger.Log(LOG_INFO, "conga_parse_xml(): setting font-type to: %s.", request_info->font_type_.c_str());
         } else if (!strncasecmp("font-size", child_name, 
                                 strlen("font-size"))) {
           DOMNode* value = child->getFirstChild();
@@ -1242,7 +1482,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->font_size_ = atof(child_value);
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): font-size: %s.", child_value);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): font-size: %s.", child_value);
         } else if (!strncasecmp("legend-font-size", child_name, 
                                 strlen("legend-font-size"))) {
           DOMNode* value = child->getFirstChild();
@@ -1255,7 +1495,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->legend_font_size_ = atof(child_value);
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): font-size: %s.", child_value);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): font-size: %s.", child_value);
         } else if (!strncasecmp("background-color", child_name, 
                                 strlen("background-color"))) {
           DOMNode* value = child->getFirstChild();
@@ -1268,7 +1508,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->background_color_ = child_value;
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): background-color: %s.", child_value);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): background-color: %s.", child_value);
         } else if (!strncasecmp("fill-color", child_name, 
                                 strlen("fill-color"))) {
           DOMNode* value = child->getFirstChild();
@@ -1281,7 +1521,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->fill_color_ = child_value;
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): fill-color: %s.", child_else);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): fill-color: %s.", child_else);
         } else if (!strncasecmp("stroke-width", child_name, 
                                 strlen("stroke-width"))) {
           DOMNode* value = child->getFirstChild();
@@ -1294,7 +1534,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->stroke_width_ = atof(child_value);
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): stroke-width: %s.", child_value);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): stroke-width: %s.", child_value);
         } else if (!strncasecmp("title", child_name, 
                                 strlen("title"))) {
           DOMNode* value = child->getFirstChild();
@@ -1307,7 +1547,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->title_ = child_value;
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): title: %s.", child_value);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): title: %s.", child_value);
         } else if (!strncasecmp("legend-text", child_name, 
                                 strlen("legend-text"))) {
           DOMNode* value = child->getFirstChild();
@@ -1320,7 +1560,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
           child_value = XMLString::transcode(value->getNodeValue());
           request_info->legend_ = child_value;
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): legend-text: %s.", child_value);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): legend-text: %s.", child_value);
         } else if (!strncasecmp("style-range-list", child_name, 
                                 strlen("style-range-list"))) {
           if (child->getNodeType() != DOMNode::ELEMENT_NODE) {
@@ -1355,7 +1595,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
           legend_support = strtol(legend_support_ptr, (char**)NULL, 10);
           XMLString::release(&legend_support_ptr);
 
-          logger.Log(LOG_DEBUGGING, "conga_parse_xml(): legend support for style id %d is %d, TODO(aka) Need to add to Style!", style_id, legend_support);
+          logger.Log(LOG_DEBUG, "conga_parse_xml(): legend support for style id %d is %d, TODO(aka) Need to add to Style!", style_id, legend_support);
 
           // Grab the children of this element.
           DOMNodeList* sub_children = child->getChildNodes();
@@ -1363,7 +1603,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
 #if DEBUG_XML
           // For Debugging:
-          logger.Log(LOG_NORMAL, "conga_parse_xml(): "
+          logger.Log(LOG_NOTICE, "conga_parse_xml(): "
                      "%s has %d sub children in doc.", 
                      child_name, num_sub_children);
 #endif
@@ -1390,7 +1630,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
             
 #if DEBUG_XML
             // For Debugging:
-            logger.Log(LOG_NORMAL, "conga_parse_xml(): %s[%d]: %s (%d), "
+            logger.Log(LOG_NOTICE, "conga_parse_xml(): %s[%d]: %s (%d), "
                        "num children: %ld.",
                        child_name, idx - 1, 
                        sub_child_name, sub_child->getNodeType(), 
@@ -1476,9 +1716,9 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
               XMLString::release(&sub_child_value);
           } // while (idx < (num_sub_children - 1)) {
 
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): Adding last HASC (%s) to Wrapper, and Wrapper to wrappers outside of while().\n", hasc.code().c_str());
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): Adding last HASC (%s) to Wrapper, and Wrapper to wrappers outside of while().\n", hasc.code().c_str());
 
-          logger.Log(LOG_VERBOSE, "conga_parse_xml(): "
+          logger.Log(LOG_INFO, "conga_parse_xml(): "
                      "Adding style range with style_id: %d.", style_id);
 
           // Add last style range entry, and then the vector to the map!
@@ -1514,7 +1754,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
                 XMLString::transcode(sub_child->getNodeName());
             char* sub_child_value = NULL;
             
-            //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): Working on idx %d, sub child %s, num children = %ld.", idx - 1, sub_child_name, sub_child->getChildNodes()->getLength());
+            //logger.Log(LOG_DEBUG, "conga_parse_xml(): Working on idx %d, sub child %s, num children = %ld.", idx - 1, sub_child_name, sub_child->getChildNodes()->getLength());
 
             if (!strncasecmp("fips-code", sub_child_name, 
                              strlen("fips-code"))) {
@@ -1525,7 +1765,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
                 wrapper.set_fips(fips);
 
-                //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): Adding Wrapper (%s) to wrappers.\n", wrapper.fips()->code().c_str());
+                //logger.Log(LOG_DEBUG, "conga_parse_xml(): Adding Wrapper (%s) to wrappers.\n", wrapper.fips()->code().c_str());
 
                 request_info->wrappers_.push_back(wrapper);
               }
@@ -1592,7 +1832,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
               XMLString::release(&sub_child_value);
           } // while (idx < (num_sub_children - 1)) {
 
-          logger.Log(LOG_DEBUGGING, "conga_parse_xml(): Adding last (?) FIPS (%s) to Wrapper, and Wrapper to wrappers outside of while().", fips.code().c_str());
+          logger.Log(LOG_DEBUG, "conga_parse_xml(): Adding last (?) FIPS (%s) to Wrapper, and Wrapper to wrappers outside of while().", fips.code().c_str());
 
           wrapper.set_fips(fips);
           request_info->wrappers_.push_back(wrapper);
@@ -1625,7 +1865,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
                 XMLString::transcode(sub_child->getNodeName());
             char* sub_child_value = NULL;
             
-            //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): Working on idx %d, sub child %s, num children = %ld.", idx - 1, sub_child_name, sub_child->getChildNodes()->getLength());
+            //logger.Log(LOG_DEBUG, "conga_parse_xml(): Working on idx %d, sub child %s, num children = %ld.", idx - 1, sub_child_name, sub_child->getChildNodes()->getLength());
 
             if (!strncasecmp("hasc-code", sub_child_name, 
                              strlen("hasc-code"))) {
@@ -1636,7 +1876,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
                 wrapper.set_hasc(hasc);
 
-                //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): Adding Wrapper (%s) to wrappers.\n", wrapper.hasc()->code().c_str());
+                //logger.Log(LOG_DEBUG, "conga_parse_xml(): Adding Wrapper (%s) to wrappers.\n", wrapper.hasc()->code().c_str());
 
                 request_info->wrappers_.push_back(wrapper);
               }
@@ -1697,7 +1937,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
               XMLString::release(&sub_child_value);
           } // while (idx < (num_sub_children - 1)) {
 
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): Adding last HASC (%s) to Wrapper, and Wrapper to wrappers outside of while().\n", hasc.code().c_str());
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): Adding last HASC (%s) to Wrapper, and Wrapper to wrappers outside of while().\n", hasc.code().c_str());
 
           wrapper.set_hasc(hasc);
           request_info->wrappers_.push_back(wrapper);
@@ -1731,7 +1971,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
                 XMLString::transcode(sub_child->getNodeName());
             char* sub_child_value = NULL;
             
-            //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): Working on idx %d, sub child %s, num children = %ld.", idx - 1, sub_child_name, sub_child->getChildNodes()->getLength());
+            //logger.Log(LOG_DEBUG, "conga_parse_xml(): Working on idx %d, sub child %s, num children = %ld.", idx - 1, sub_child_name, sub_child->getChildNodes()->getLength());
 
             if (!strncasecmp("longitude", sub_child_name, 
                              strlen("longitude"))) {
@@ -1742,7 +1982,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
 
                 wrapper.set_lonlat(lonlat);
 
-                //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): Adding Wrapper (%s) to wrappers.\n", wrapper.lonlat()->code().c_str());
+                //logger.Log(LOG_DEBUG, "conga_parse_xml(): Adding Wrapper (%s) to wrappers.\n", wrapper.lonlat()->code().c_str());
 
                 request_info->wrappers_.push_back(wrapper);
               }
@@ -1816,7 +2056,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
               XMLString::release(&sub_child_value);
           } // while (idx < (num_sub_children - 1)) {
 
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): Adding last HASC (%s) to Wrapper, and Wrapper to wrappers outside of while().\n", hasc.code().c_str());
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): Adding last HASC (%s) to Wrapper, and Wrapper to wrappers outside of while().\n", hasc.code().c_str());
 
           wrapper.set_lonlat(lonlat);
           request_info->wrappers_.push_back(wrapper);
@@ -1849,7 +2089,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
           }
           child_value = XMLString::transcode(value->getNodeValue());
 
-          //logger.Log(LOG_DEBUGGING, "conga_parse_xml(): working with child value (len %ld): %s.", strlen(child_value), child_value);
+          //logger.Log(LOG_DEBUG, "conga_parse_xml(): working with child value (len %ld): %s.", strlen(child_value), child_value);
 
           // Parse the child value for all the Wrappers it contains.
           int cnt = 
@@ -1883,7 +2123,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
            (int)(end_internal_time.tv_usec/1000000.0)) - 
           (start_internal_time.tv_sec + 
            (int)(start_internal_time.tv_usec/1000000.0));
-      // XXX logger.Log(LOG_NORMAL, "conga_parse_xml(): PROFILING XML message parsed internally in %ds.", time_internal_diff);
+      // XXX logger.Log(LOG_NOTICE, "conga_parse_xml(): PROFILING XML message parsed internally in %ds.", time_internal_diff);
 
 #if DEBUG_WRAPPERS
       // For Debugging:
@@ -1904,7 +2144,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
         }
 
         // TOOD(aka) Will logger.Log() handle an arbitrarily large char*?
-        logger.Log(LOG_NORMAL, "DEBUG: Wrappers after XML parse (%ld): %s.", 
+        logger.Log(LOG_NOTICE, "DEBUG: Wrappers after XML parse (%ld): %s.", 
                    request_info->wrappers_.size(), tmp_str.c_str());
       }
 #endif
@@ -1934,7 +2174,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
             snprintf((char*)tmp_str.c_str() + strlen(tmp_str.c_str()),
                      1024 - strlen(tmp_str.c_str()), ", ");
         }
-        logger.Log(LOG_NORMAL, "DEBUG: Styles after XML parse (%ld): %s", 
+        logger.Log(LOG_NOTICE, "DEBUG: Styles after XML parse (%ld): %s", 
                    request_info->styles_.size(), tmp_str.c_str());
       }
 #endif
@@ -2207,9 +2447,9 @@ void conga_gen_wsdl_response(const ConfInfo& info, const RequestInfo& request_in
   peer->AddMsgBuf(ack_hdr.print_hdr(0).c_str(), ack_hdr.hdr_len(), 
                   request_info.results_.c_str(), ack_hdr.msg_len(), ack_msg_hdr);
 
-  logger.Log(LOG_DEBUGGING, "conga_gen_wsdl_response(): %s is waiting transmission to %s, contents: %s", ack_hdr.print().c_str(), peer->print().c_str(), request_info.results_.c_str());
+  logger.Log(LOG_DEBUG, "conga_gen_wsdl_response(): %s is waiting transmission to %s, contents: %s", ack_hdr.print().c_str(), peer->print().c_str(), request_info.results_.c_str());
 
-  logger.Log(LOG_VERBOSE, "Processed WSDL REQUEST (%s) from %s.", 
+  logger.Log(LOG_INFO, "Processed WSDL REQUEST (%s) from %s.", 
              http_hdr.print_start_line().c_str(), 
              peer->print().c_str());
 }
