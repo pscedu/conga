@@ -36,7 +36,6 @@ using namespace std;
 #define DEBUG_MUTEX_LOCK 0
 
 // Global variables.
-pthread_mutex_t request_list_lock;  // needs to be accessible in conga-procs
 
 // Static defaults.
 static const int kFramingType = MsgHdr::TYPE_HTTP;
@@ -54,6 +53,7 @@ const in_port_t kServerPort = CONGA_SERVER_PORT;
 int main(int argc, char* argv[]) {
   ConfInfo conf_info;           // configuration information
   list<RequestInfo> requests;   // flow requests currently active
+  pthread_mutex_t request_list_mtx;
   list<SSLSession> to_peers;    // initated connections (to other nodes)
   //pthread_mutex_t to_peers_mtx = PTHREAD_MUTEX_INITIALIZER;
   pthread_mutex_t to_peers_mtx;
@@ -67,6 +67,11 @@ int main(int argc, char* argv[]) {
                                 // handle multple listening ports (we
                                 // accept(2) or connect(2) to peers,
                                 // though), e.g., IPv4, IPv6, aliases
+  SSLContext ssl_context;  // TODO(aka) this should have a mutex too,
+                           // as its internal reference will be
+                           // incremented in both Accept & Socket, but
+                           // SSL_Conn::Socket can occur in a thread,
+                           // no?
 
   // Set default values (can be overridden by user).
   conf_info.log_to_stderr_ = 0;
@@ -80,7 +85,7 @@ int main(int argc, char* argv[]) {
 
   logger.set_proc_name("conga");
 
-  pthread_mutex_init(&request_list_lock, NULL);
+  pthread_mutex_init(&request_list_mtx, NULL);
   pthread_mutex_init(&to_peers_mtx, NULL);
   pthread_mutex_init(&from_peers_mtx, NULL);
   pthread_mutex_init(&thread_list_mtx, NULL);
@@ -127,7 +132,6 @@ int main(int argc, char* argv[]) {
   // Setup/initialize SSL.
   // HACK: const char* server_id = process_name(conf_info.Proc_ID());
   const char* server_id = "conga-tls";
-  SSLContext ssl_context;
   ssl_context.Init(TLSv1_method(), server_id,
                    "limbo.psc.edu.key.pem", "/home/pscnoc/conga/certs", SSL_FILETYPE_PEM, NULL, 
                    "limbo.psc.edu.crt.pem", "/home/pscnoc/conga/certs", SSL_FILETYPE_PEM, 
@@ -360,7 +364,8 @@ int main(int argc, char* argv[]) {
                 !from_peer->IsIncomingMsgBeingProcessed()) {
               // Build struct for function arguments.
               struct conga_incoming_msg_args args = {
-                &conf_info, &requests, to_peers, from_peer, from_peers.end(), 
+                &conf_info, ssl_context, &requests, &request_list_mtx,
+                &to_peers, &to_peers_mtx, from_peer, from_peers.end(), 
                 &thread_list, &thread_list_mtx,
               };
 
@@ -377,7 +382,7 @@ int main(int argc, char* argv[]) {
                          tid, from_peer->print().c_str());
             } else if (!conf_info.multi_threaded_) {
               // Process message single threaded.
-              conga_process_incoming_msg(&conf_info, from_peer);
+              conga_process_incoming_msg(&conf_info, ssl_context, &requests, &request_list_mtx, &to_peers, &to_peers, from_peer);
               if (error.Event()) {
                 // Note, if we reached here, then we could not NACK the
                 // error we encountered processing the message in
