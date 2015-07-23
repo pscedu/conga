@@ -251,8 +251,8 @@ bool conga_process_incoming_msg(ConfInfo* info, list<RequestInfo>* requests,
                 {
                   if (!service.compare(kServiceAuth)) {
                   } else if (!service.compare(kServiceAllocations)) {
-            RequestInfo request_info;
-            request_info.peer_ = peer->hostname();  // associate request with IP
+                    RequestInfo request_info;  // XXX
+                    request_info.peer_ = peer->hostname();  // associate request with IP
 
                     conga_process_get_allocations(*info, http_hdr, msg_body,
                                                   msg_data, &request_info);
@@ -271,6 +271,8 @@ bool conga_process_incoming_msg(ConfInfo* info, list<RequestInfo>* requests,
                     conga_process_post_auth(*info, http_hdr, msg_body, 
                                             msg_data, requests);
                   } else if (!service.compare(kServiceAllocations)) {
+                    RequestInfo request_info;  // XXX
+                    request_info.peer_ = peer->hostname();  // associate request with IP
                     conga_process_post_allocations(*info, http_hdr, msg_body,
                                                    msg_data, &request_info);
                   } else {
@@ -307,6 +309,8 @@ bool conga_process_incoming_msg(ConfInfo* info, list<RequestInfo>* requests,
               // and wait for its removal back in the main event-loop.
 
               error.AppendMsg("conga_process_incoming_msg()");
+                    RequestInfo request_info;  // XXX
+                    request_info.peer_ = peer->hostname();  // associate request with IP
               conga_gen_http_error_response(*info, request_info, http_hdr, peer);
               if (error.Event()) {
                 // Report the non-NACKable error.
@@ -524,7 +528,7 @@ void conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& http
              kDetailSrcIP, request_info->src_ip_.c_str(), kDetailSrcPort, request_info->src_port_,
              kDetailDstIP, request_info->dst_ip_.c_str(), kDetailDstPort, request_info->dst_port_,
              kDetailDuration, request_info->duration_);
-    request_info->results_ = results;
+    request_info->results_ = results;  // XXX Instead of putting our response in results, perhaps we just return the string from the routine?  Because it really makes no sense that this response message would have anything to do with a FlowInfo or FlowRequest or Tokens or APIKeys or whatever we're using as a key.  As far as return codes, an Error.Event would signify returning a 404.
 
     logger.Log(LOG_NOTICE, "Processed GET allocations (%s:%s, %s:%s) from %s.",
                kDetailAllocationID, request_info->allocation_id_.c_str(),
