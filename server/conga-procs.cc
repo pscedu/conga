@@ -50,8 +50,8 @@ using namespace xercesc;
 #define DEBUG_XML 0
 #define DEBUG_MUTEX_LOCK 0
 
-static const char* kServiceAllocations = "api/allocations";
-static const char* kServiceAuth = "api/auth";
+static const char* kServiceAllocations = "allocations";
+static const char* kServiceAuth = "auth";
 static const char* kServiceDancesAuth = "api/v1/dances";
 
 static const char* kDetailAPIKey = "api_key";
@@ -502,10 +502,8 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
     while (flow_itr != flows->end()) {
       string key = flow_itr->api_key_;
       std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-      if (!key.compare(details[kDetailAPIKey].GetString())) {
-        found++;
+      if (!key.compare(details[kDetailAPIKey].GetString()))
         break;
-      }
 
       flow_itr++;
     }
@@ -538,7 +536,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
   //tmp_session.set_handle(tmp_session.fd());  // for now, set it to the socket
   if (error.Event()) {
     error.AppendMsg("conga_process_post_auth(): ");
-    return;
+    return "";
   }
 
   // Build a (HTTP) framing header and load the framing header into
@@ -589,7 +587,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
   tmp_session.Write();
   if (error.Event()) {
     error.AppendMsg("conga_process_post_auth(): ");
-    return;
+    return "";
   }
 
   // If we made it here, hang around to get our response ...
@@ -598,7 +596,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
   bytes_read = tmp_session.Read(&eof);
   if (error.Event()) {
     error.AppendMsg("conga_process_post_auth(): ");
-    return;
+    return "";
   }
 
   tmp_session.Close();
@@ -610,19 +608,19 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
   if (response.Parse(tmp_session.rbuf()).HasParseError()) {
     error.Init(EX_DATAERR, "conga_process_post_auth(): Failed to parse JSON from %s: %s",
                tmp_session.hostname().c_str(), tmp_session.rbuf());
-    return;
+    return "";
   }
 
   if (!response.HasMember(kDetailIsActive) || !response[kDetailIsActive].IsBool()) {
     error.Init(EX_DATAERR, "conga_process_post_auth(): %s is invalid: %s", 
                kDetailIsActive, tmp_session.rbuf());
-    return;
+    return "";
   }
 
   if (!response[kDetailIsActive].GetBool()) {
     error.Init(EX_DATAERR, "conga_process_post_auth(): "
                "Authorization failure with request %s", auth_db_url.print().c_str());
-    return;
+    return "";
   }
 
   // Setup auth variables.
@@ -643,7 +641,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_post_auth: requesting request list lock.");
 #endif
-    pthread_mutex_lock(&flow_list_mtx);
+    pthread_mutex_lock(flow_list_mtx);
     list<FlowInfo>::iterator flow_itr = flows->begin();
     while (flow_itr != flows->end()) {
       string key = flow_itr->api_key_;
@@ -661,8 +659,8 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
 #if DEBUG_MUTEX_LOCK
       warnx("conga_process_post_auth: releasing request list lock.");
 #endif
-      pthread_mutex_unlock(&flow_list_mtx);
-      return;
+      pthread_mutex_unlock(flow_list_mtx);
+      return "";
     }
 
     // Update our expiration (note, we leave start_time_ unchanged).
@@ -683,13 +681,13 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_post_auth: releasing request list lock.");
 #endif
-    pthread_mutex_unlock(&flow_list_mtx);
+    pthread_mutex_unlock(flow_list_mtx);
 
     logger.Log(LOG_NOTICE, "Processed POST auth (%s:%s, %s:%s, %s:%s) from %s.",
-               kDetailUserID, itr->user_id_.c_str(),
-               kDetailProjectID, itr->project_id_.c_str(),
-               kDetailResourceID, itr->resource_id_.c_str(),
-               peer_.c_str());
+               kDetailUserID, flow_itr->user_id_.c_str(),
+               kDetailProjectID, flow_itr->project_id_.c_str(),
+               kDetailResourceID, flow_itr->resource_id_.c_str(),
+               peer->hostname().c_str());
   } else {
     FlowInfo new_request;
     new_request.api_key_ = gen_random_string(kAPIKeySize);
@@ -716,18 +714,18 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_post_auth: requesting request list lock.");
 #endif
-    pthread_mutex_lock(&flow_list_mtx);
+    pthread_mutex_lock(flow_list_mtx);
     flows->push_back(new_request);
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_post_auth: releasing request list lock.");
 #endif
-    pthread_mutex_unlock(&flow_list_mtx);
+    pthread_mutex_unlock(flow_list_mtx);
 
     logger.Log(LOG_NOTICE, "Processed POST auth (%s:%s, %s:%s, %s:%s) from %s.",
                kDetailUserID, new_request.user_id_.c_str(),
                kDetailProjectID, new_request.project_id_.c_str(),
                kDetailResourceID, new_request.resource_id_.c_str(),
-               peer_.c_str());
+               peer->hostname().c_str());
   }
 
   // Head back to conga_process_incoming_msg() to send RESPONSE out.
@@ -735,14 +733,14 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
 }
 
 // Routine to ge the status of a user's token (api-key).
-void conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
-                            const string& msg_body, const File& msg_data,
-                            list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx) {
+string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
+                              const string& msg_body, const File& msg_data,
+                              list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx) {
   URL url = http_hdr.uri();
 
   // Grab the API Key from the path (should be the last value).
-  size_t last_slash = url.path.find_last_of("/");
-  string api_key = url.path.substr(last_slash + 1);
+  size_t last_slash = url.path().find_last_of("/");
+  string api_key = url.path().substr(last_slash + 1);
   if (api_key.size() <= 0) {
     // They requested a renewal, but we have no record of this key!
     error.Init(EX_DATAERR, "conga_process_get_auth(): "
@@ -796,7 +794,7 @@ void conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
 
   logger.Log(LOG_DEBUG, "conga_process_get_auth(): "
              "working on user: %s, project: %s, resource: %s.",
-             flow_itr->user_.c_str(), flow_itr->project_id_.c_str(), flow_itr->resource_id_.c_str());
+             flow_itr->user_id_.c_str(), flow_itr->project_id_.c_str(), flow_itr->resource_id_.c_str());
 
   string ret_msg(kHTTPMsgBodyMaxSize, '\0');
   int status = 0;
@@ -819,7 +817,7 @@ void conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
              kDetailAPIKey, flow_itr->api_key_.c_str(),
              kDetailUserID, flow_itr->user_id_.c_str(),
              kDetailProjectID, flow_itr->project_id_.c_str(),
-             peer_.c_str());
+             peer->hostname().c_str());
 
   // Head back to conga_process_incoming_msg() to send RESPONSE out.
   return ret_msg;
@@ -831,6 +829,8 @@ string conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& h
   URL url = http_hdr.uri();
 
   // Get the allocation_id if the user specified one in the RESTful request.
+
+#if 0  // Deprecated code: allocation_id use to be in the query as opposed to the path.
   list<struct url_query_info> queries = url.query();
   list<struct url_query_info>::iterator itr = queries.begin();
   while (itr != queries.end()) {
@@ -845,27 +845,27 @@ string conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& h
 
     itr++;
   }
+#endif
+
+  size_t last_slash = url.path().find_last_of("/");
+  string allocation_id = url.path().substr(last_slash + 1);
 
   // Parse JSON message-body.
   rapidjson::Document details;
   if (details.Parse(msg_body.c_str()).HasParseError()) {
     error.Init(EX_DATAERR, "conga_process_post_allocations(): "
                "Failed to parse JSON: %s", msg_body.c_str());
-    return;
+    return "";
   }
 
-  if (request_info->allocation_id_.size() > 0) {
-    if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString()) {
-      error.Init(EX_DATAERR, "conga_process_post_allocations(): %s is invalid: %s",
-                 kDetailAPIKey, msg_body.c_str());
-      return;
-    }
-
+  // Now, see if this is a create or renewal request ...
+  if (allocation_id.size() > 0) {
+    // User requested a renewal.
     error.Init(EX_DATAERR, "conga_process_post_allocations(): "
-               "Can't handle allocation updates yet: %s", 
-               request_info->allocation_id_.c_str());
-    return;
+               "POST allocation renewal (%s) not supported yet", allocation_id.c_str());
+    return "";
   } else {
+    // This is an instantiation request.
     if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString() ||
         !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString() ||
         !details.HasMember(kDetailSrcIP) || !details[kDetailSrcIP].IsString() ||
@@ -875,58 +875,91 @@ string conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& h
                  "%s, %s, %s, %s or %s is invalid: %s", 
                  kDetailAPIKey, kDetailProjectID, kDetailSrcIP, kDetailDstIP, kDetailDuration,
                  msg_body.c_str());
-      return;
+      return "";
     }
 
-    request_info->api_key_ = details[kDetailAPIKey].GetString();
-    request_info->project_id_ = details[kDetailProjectID].GetString();
-    request_info->src_ip_ = details[kDetailSrcIP].GetString();
-    request_info->dst_ip_ = details[kDetailDstIP].GetString();
-    request_info->duration_ = details[kDetailDuration].GetInt();
+    // Find the flow information that associated with the api-key.
+    // XXX TODO(aka) This is mucked up, as there can be multiple API keys ... Sounds like API keys need to be their own record!
+    logger.Log(LOG_EMERG, "conga_process_post_allocations(): XXX TODO(aka) Add code to submit request!");
+
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_post_allocations: requesting request list lock.");
+#endif
+    pthread_mutex_lock(flow_list_mtx);
+    list<FlowInfo>::iterator flow_itr = flows->begin();
+    while (flow_itr != flows->end()) {
+      string key = flow_itr->api_key_;
+      std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+      if (!key.compare(details[kDetailAPIKey].GetString()))
+        break;
+
+      flow_itr++;
+    }
+
+    if (flow_itr == flows->end()) {
+      error.Init(EX_DATAERR, "conga_process_post_allocations(): "
+                 "API Key: %s, not found in state table", details[kDetailAPIKey].GetString());
+#if DEBUG_MUTEX_LOCK
+      warnx("conga_process_post_allocations: releasing request list lock.");
+#endif
+      pthread_mutex_unlock(flow_list_mtx);
+      return "";
+    }
+
+    flow_itr->src_ip_ = details[kDetailSrcIP].GetString();
+    flow_itr->dst_ip_ = details[kDetailDstIP].GetString();
+    flow_itr->duration_ = details[kDetailDuration].GetInt();
 
     // See what else we have ...
+#if 0  // TODO(aka) Wouldn't user_id be setup during auth?
     if (details.HasMember(kDetailUserID)) {
       if (details[kDetailUserID].IsString())
-        request_info->user_id_ = details[kDetailUserID].GetString();
+        flow_itr->user_id_ = details[kDetailUserID].GetString();
     }
+#endif
 
     if (details.HasMember(kDetailSrcPort)) {
       if (details[kDetailSrcPort].IsInt())
-        request_info->src_port_ = details[kDetailSrcPort].GetInt();
+        flow_itr->src_port_ = details[kDetailSrcPort].GetInt();
     }
 
     if (details.HasMember(kDetailDstPort)) {
       if (details[kDetailDstPort].IsInt())
-        request_info->dst_port_ = details[kDetailDstPort].GetInt();
+        flow_itr->dst_port_ = details[kDetailDstPort].GetInt();
     }
 
     // Submit the request and figure out its status ...
-    logger.Log(LOG_EMERG, "conga_process_post_allocations(): TODO(aka) Add code to submit request!");
+    logger.Log(LOG_EMERG, "conga_process_post_allocations(): XXX TODO(aka) Add code to submit request!");
 
-    request_info->allocation_id_ = "1234";
+    flow_itr->allocation_id_ = "1234";
     string state = "queued";
-
     int status = 0;
-  string ret_msg(kHTTPMsgBodyMaxSize, '\0');
-    string results(1024, '\0');
-    snprintf((char*)results.c_str(), 1023, "{ \"status\":%d, \"results\": [ { "
+    string ret_msg(kHTTPMsgBodyMaxSize, '\0');
+
+    // Build the response.
+    snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ { "
              "\"%s\":\"%s\", \"%s\":\"%s\" } ] }",
              status,
-             kDetailAllocationID, request_info->allocation_id_.c_str(), 
+             kDetailAllocationID, flow_itr->allocation_id_.c_str(), 
              kDetailState, state.c_str());
-    request_info->results_ = results;
 
     logger.Log(LOG_NOTICE, "Processed POST allocations "
                "(%s:%s, %s:%s, %s:%s, %s:%s, %s:%d) from %s.",
-               kDetailAPIKey, request_info->api_key_.c_str(),
-               kDetailProjectID, request_info->project_id_.c_str(),
-               kDetailSrcIP, request_info->src_ip_.c_str(),
-               kDetailDstIP, request_info->dst_ip_.c_str(),
-               kDetailDuration, request_info->duration_,
-               request_info->peer_.c_str());
+               kDetailAPIKey, flow_itr->api_key_.c_str(),
+               kDetailProjectID, flow_itr->project_id_.c_str(),
+               kDetailSrcIP, flow_itr->src_ip_.c_str(),
+               kDetailDstIP, flow_itr->dst_ip_.c_str(),
+               kDetailDuration, flow_itr->duration_,
+               peer->hostname().c_str());
+
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_post_allocations: releasing request list lock.");
+#endif
+    pthread_mutex_unlock(flow_list_mtx);
   }
 
   // Head back to conga_process_incoming_msg() to send RESPONSE out.
+  return ret_msg;
 }
 
 // Process the kServiceRequestToken service & "message-body" in our message.
@@ -936,6 +969,8 @@ string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& ht
   URL url = http_hdr.uri();
 
   // Get the allocation_id if the user specified one in the RESTful request.
+
+#if 0  // Deprecated code: allocation_id use to be in the query as opposed to the path.
   list<struct url_query_info> queries = url.query();
   list<struct url_query_info>::iterator itr = queries.begin();
   while (itr != queries.end()) {
@@ -950,32 +985,62 @@ string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& ht
 
     itr++;
   }
+#endif
+
+  size_t last_slash = url.path().find_last_of("/");
+  string allocation_id = url.path().substr(last_slash + 1);
 
   // Parse JSON message-body.
   rapidjson::Document details;
   if (details.Parse(msg_body.c_str()).HasParseError()) {
     error.Init(EX_DATAERR, "conga_process_get_allocations(): "
                "Failed to parse JSON: %s", msg_body.c_str());
-    return;
+    return "";
   }
 
-  if (request_info->allocation_id_.size() > 0) {
-    if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString()) {
-      error.Init(EX_DATAERR, "conga_process_get_allocations(): %s is invalid: %s",
-                 kDetailAPIKey, msg_body.c_str());
-      return;
+  if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString()) {
+    error.Init(EX_DATAERR, "conga_process_get_allocations(): %s is invalid: %s",
+               kDetailAPIKey, msg_body.c_str());
+    return "";
+  }
+
+  string ret_msg(kHTTPMsgBodyMaxSize, '\0');
+
+  // See if request is for all allocations for the user's project, or just a specific one ...
+  if (allocation_id.size() > 0) {
+    // Find the flow that matches our allocation_id ...
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_get_allocations: requesting request list lock.");
+#endif
+    pthread_mutex_lock(flow_list_mtx);
+    list<FlowInfo>::iterator flow_itr = flows->begin();
+    while (flow_itr != flows->end()) {
+      string flow_allocation_id = flow_itr->allocation_id_;
+      std::transform(flow_allocation_id.begin(), flow_allocation_id.end(),
+                     flow_allocation_id.begin(), ::tolower);
+      if (!flow_allocation_id.compare(allocation_id))
+        break;
+
+      flow_itr++;
     }
 
-    request_info->api_key_ = details[kDetailAPIKey].GetString();
+    if (flow_itr == flows->end()) {
+      error.Init(EX_DATAERR, "conga_process_get_allocations(): "
+                 "Allocation ID: %s, not found in state table", allocation_id.c_str());
+#if DEBUG_MUTEX_LOCK
+      warnx("conga_process_get_allocations: releasing request list lock.");
+#endif
+      pthread_mutex_unlock(flow_list_mtx);
+      return "";
+    }
 
-    // Build allocation response ...
     logger.Log(LOG_EMERG, "conga_process_get_allocations(): TODO(aka) Add code to get status!");
+    string state = "running";
 
     int status = 0;
-    string state = "running";
-  string ret_msg(kHTTPMsgBodyMaxSize, '\0');
-    string results(1024, '\0');
-    snprintf((char*)results.c_str(), 1023, "{ \"status\":%d, \"results\": [ { "
+    
+    // Build response.
+    snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ { "
              "\"%s\":\"%s\", "
              "\"%s\": %d, \"%s\": %d, "
              "\"%s\":\"%s\", "
@@ -985,66 +1050,88 @@ string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& ht
              "\"%s\":\"%s\", \"%s\":%d, "
              "\"%s\":%d, "
              "} ] }", 
-             status, kDetailAllocationID, request_info->allocation_id_.c_str(),
-             kDetailStartTime, request_info->start_time_, kDetailEndTime, request_info->end_time_,
+             status, kDetailAllocationID, flow_itr->allocation_id_.c_str(),
+             kDetailStartTime, flow_itr->start_time_, kDetailEndTime, flow_itr->end_time_,
              kDetailState, state.c_str(), 
-             kDetailBandwidth, request_info->bandwidth_,
-             kDetailUserID, request_info->user_id_.c_str(),
-             kDetailProjectID, request_info->project_id_.c_str(),
-             kDetailSrcIP, request_info->src_ip_.c_str(), kDetailSrcPort, request_info->src_port_,
-             kDetailDstIP, request_info->dst_ip_.c_str(), kDetailDstPort, request_info->dst_port_,
-             kDetailDuration, request_info->duration_);
-    request_info->results_ = results;  // XXX Instead of putting our response in results, perhaps we just return the string from the routine?  Because it really makes no sense that this response message would have anything to do with a FlowInfo or FlowRequest or Tokens or APIKeys or whatever we're using as a key.  As far as return codes, an Error.Event would signify returning a 404.
+             kDetailBandwidth, flow_itr->bandwidth_,
+             kDetailUserID, flow_itr->user_id_.c_str(),
+             kDetailProjectID, flow_itr->project_id_.c_str(),
+             kDetailSrcIP, flow_itr->src_ip_.c_str(), kDetailSrcPort, flow_itr->src_port_,
+             kDetailDstIP, flow_itr->dst_ip_.c_str(), kDetailDstPort, flow_itr->dst_port_,
+             kDetailDuration, flow_itr->duration_);
 
     logger.Log(LOG_NOTICE, "Processed GET allocations (%s:%s, %s:%s) from %s.",
-               kDetailAllocationID, request_info->allocation_id_.c_str(),
-               kDetailAPIKey, request_info->api_key_.c_str(),
-               request_info->peer_.c_str());
+               kDetailAllocationID, flow_itr->allocation_id_.c_str(),
+               kDetailAPIKey, flow_itr->api_key_.c_str(),
+               peer->hostname().c_str());
+
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_get_allocations: releasing request list lock.");
+#endif
+    pthread_mutex_unlock(flow_list_mtx);
+
   } else {
+    // User wants to list all flows that they are associated with.
     if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString() ||
         !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString()) {
       error.Init(EX_DATAERR, "conga_process_get_allocations(): %s or %s is invalid: %s",
                  kDetailAPIKey, kDetailProjectID, msg_body.c_str());
-      return;
+      return "";
     }
 
-    request_info->api_key_ = details[kDetailAPIKey].GetString();
-    request_info->project_id_ = details[kDetailProjectID].GetString();
-
-    // Build allocation response ...
-    logger.Log(LOG_EMERG, "conga_process_get_allocations(): TODO(aka) Add code to get status!");
-
-    // TODO(aka) Need to loop over all allocations returned ...
-
     int status = 0;
-    string state = "running";
-  string ret_msg(kHTTPMsgBodyMaxSize, '\0');
-    string results(1024, '\0');
-    snprintf((char*)results.c_str(), 1023, "{ \"status\":%d, \"results\": [ { "
-             "\"%s\":\"%s\", "
-             "\"%s\": %d, \"%s\": %d, "
-             "\"%s\":\"%s\", "
-             "\"%s\":%d, "
-             "\"%s\":\"%s\", \"%s\":\"%s\", "
-             "\"%s\":\"%s\", \"%s\":%d, "
-             "\"%s\":\"%s\", \"%s\":%d, "
-             "\"%s\":%d, "
-             "} ] }", 
-             status, kDetailAllocationID, request_info->allocation_id_.c_str(),
-             kDetailStartTime, request_info->start_time_, kDetailEndTime, request_info->end_time_,
-             kDetailState, state.c_str(), 
-             kDetailBandwidth, request_info->bandwidth_,
-             kDetailUserID, request_info->user_id_.c_str(),
-             kDetailProjectID, request_info->project_id_.c_str(),
-             kDetailSrcIP, request_info->src_ip_.c_str(), kDetailSrcPort, request_info->src_port_,
-             kDetailDstIP, request_info->dst_ip_.c_str(), kDetailDstPort, request_info->dst_port_,
-             kDetailDuration, request_info->duration_);
-    request_info->results_ = results;
+    snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ ", status);
+
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_get_allocations: requesting request list lock.");
+#endif
+    pthread_mutex_lock(flow_list_mtx);
+    list<FlowInfo>::iterator flow_itr = flows->begin();
+    while (flow_itr != flows->end()) {
+      string key = flow_itr->api_key_;
+      std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+      if (!key.compare(details[kDetailAPIKey].GetString())) {
+
+        logger.Log(LOG_EMERG, "conga_process_get_allocations(): TODO(aka) Add code to get status!");
+        string state = "running";
+
+        // Add flow info to response message.
+        snprintf((char*)ret_msg.c_str() + strlen(ret_msg.c_str()),
+                 (kHTTPMsgBodyMaxSize - 1) - strlen(ret_msg.c_str()),
+                 "{ \"%s\":\"%s\", "
+                 "\"%s\": %d, \"%s\": %d, "
+                 "\"%s\":\"%s\", "
+                 "\"%s\":%d, "
+                 "\"%s\":\"%s\", \"%s\":\"%s\", "
+                 "\"%s\":\"%s\", \"%s\":%d, "
+                 "\"%s\":\"%s\", \"%s\":%d, "
+                 "\"%s\":%d, }, ",
+                 kDetailAllocationID, flow_itr->allocation_id_.c_str(),
+                 kDetailStartTime, flow_itr->start_time_, kDetailEndTime, flow_itr->end_time_,
+                 kDetailState, state.c_str(), 
+                 kDetailBandwidth, flow_itr->bandwidth_,
+                 kDetailUserID, flow_itr->user_id_.c_str(),
+                 kDetailProjectID, flow_itr->project_id_.c_str(),
+                 kDetailSrcIP, flow_itr->src_ip_.c_str(), kDetailSrcPort, flow_itr->src_port_,
+                 kDetailDstIP, flow_itr->dst_ip_.c_str(), kDetailDstPort, flow_itr->dst_port_,
+                 kDetailDuration, flow_itr->duration_);
+      }
+
+      flow_itr++;
+    }  // while (flow_itr != flows->end()) {
+
+    snprintf((char*)ret_msg.c_str() + strlen(ret_msg.c_str()),
+             (kHTTPMsgBodyMaxSize - 1) - strlen(ret_msg.c_str()), "] }");
+
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_get_allocations: releasing request list lock.");
+#endif
+    pthread_mutex_unlock(flow_list_mtx);
 
     logger.Log(LOG_NOTICE, "Processed GET allocations (%s:%s, %s:%s) from %s.",
-               kDetailAPIKey, request_info->api_key_.c_str(),
-               kDetailProjectID, request_info->project_id_.c_str(),
-               request_info->peer_.c_str());
+               kDetailAPIKey, flow_itr->api_key_.c_str(),
+               kDetailProjectID, flow_itr->project_id_.c_str(),
+               peer->hostname().c_str());
   }
 
   // Head back to conga_process_incoming_msg() to send RESPONSE out.
@@ -1055,10 +1142,9 @@ string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& ht
 // message.
 //
 // This routine can set an ErrorHandler event.
-void conga_gen_http_error_response(const ConfInfo& info,
-                                  const RequestInfo& request_info, 
-                                  const HTTPFraming& http_hdr, 
-                                  list<SSLSession>::iterator peer) {
+void conga_gen_http_error_response(const ConfInfo& info, 
+                                   const HTTPFraming& http_hdr, 
+                                   list<SSLSession>::iterator peer) {
   // Build ERROR message.
   string msg(1024, '\0');  // '\0' so strlen() works
   snprintf((char*)msg.c_str() + strlen(msg.c_str()),
@@ -1124,9 +1210,8 @@ void conga_gen_http_error_response(const ConfInfo& info,
 }
 
 // Routine to encapsulate (frame) the REPONSE as a standard HTTP message.
-void conga_gen_http_response(const ConfInfo& info, const RequestInfo& request_info, 
-                             const HTTPFraming& http_hdr, const string msg,
-                             list<SSLSession>::iterator peer) {
+void conga_gen_http_response(const ConfInfo& info, const HTTPFraming& http_hdr,
+                             const string msg, list<SSLSession>::iterator peer) {
   // Setup HTTP RESPONSE message header.
   HTTPFraming ack_hdr;
   ack_hdr.InitResponse(200, HTTPFraming::CLOSE);

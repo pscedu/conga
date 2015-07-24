@@ -15,13 +15,12 @@
 
 // Accessors & mutators.
 void FlowInfo::clear(void) {
-  api_key_.clear();
+  allocations_id_.clear();
 
+  api_key_.clear();
   user_id_.clear();
   project_id_.clear();
   resource_id_.clear();
-
-  // allocations_id;
 
   bandwidth_ = 0;
   start_time_ = 0;
@@ -31,7 +30,6 @@ void FlowInfo::clear(void) {
 
   src_ip_.clear();
   dst_ip_.clear();
-
 
   peer_.clear();
   msg_hdr_id_ = 0;

@@ -28,13 +28,12 @@ class FlowInfo {
   // later when we figure out what we need and don't need.
 
   // Flow details.
-  string api_key_;            // API-Key associated with this flow
+  string allocation_id_;      // unique token for this flow (TODO(aka) should be call flow_id!)
 
+  string api_key_;            // API-Key associated with this flow (keys map to user/grant)
   string user_id_;
   string project_id_;         // matches grant # in auth database
   string resource_id_;
-
-  string allocation_id_;      // XXX not currently used?
 
   int bandwidth_;
   int start_time_;
@@ -58,14 +57,16 @@ class FlowInfo {
 
   virtual ~FlowInfo(void) { };
 
+  // Copy constructor.
+  FlowInfo(const FlowInfo& src);  // use system default 
+
   // Accessors & mutators.
   void clear(void);
 
  protected:
 
  private:
-  // Dummy declarations for copy constructor and assignment & equality operator.
-  FlowInfo(const FlowInfo& src);
+  // Dummy declarations for assignment & equality operator.
   void operator =(const FlowInfo& src);
   int operator ==(const FlowInfo& other) const;
 };
