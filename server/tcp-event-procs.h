@@ -29,9 +29,9 @@ int tcp_event_poll_status(struct pollfd pollfds[], int nfds, int start_index);
 list<SSLSession>::iterator 
 tcp_event_poll_get_peer(const ConfInfo& info, const int fd, 
                         list<SSLSession>* peers);
-int tcp_event_accept(const ConfInfo& info, const TCPConn& server, 
+int tcp_event_accept(const ConfInfo& info, const SSLConn& server, 
                      const int max_open_connections, const int framing,
-                     list<SSLSession>* from_peers);
+                     SSLContext* ssl_context, list<SSLSession>* from_peers);
 void tcp_event_read(const ConfInfo& info, list<SSLSession>::iterator peer);
 void tcp_event_write(const ConfInfo& info, list<SSLSession>::iterator peer);
 

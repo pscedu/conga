@@ -75,7 +75,7 @@ static const char* kDetailBandwidth = "bandwidth";
 
 static const char* kDetailIsActive = "is_active";
 
-const size_t kAPIKeySize = 16;
+static const size_t kAPIKeySize = 16;
 
 
 // Routine to process a ready (incoming) message in our SSLSession
@@ -84,7 +84,9 @@ const size_t kAPIKeySize = 16;
 // processing).
 //
 // This routine can set an ErrorHandler event.
-bool conga_process_incoming_msg(ConfInfo* info, list<RequestInfo>* requests,
+bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context, 
+                                list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx,
+                                list<SSLSession>* to_peers, pthread_mutex_t* to_peers_mtx,
                                 list<SSLSession>::iterator peer) {
   if (&(*peer) == NULL) {  // note iterator hack
     error.Init(EX_SOFTWARE, "conga_process_incoming_msg(): peer is NULL");
@@ -210,11 +212,11 @@ bool conga_process_incoming_msg(ConfInfo* info, list<RequestInfo>* requests,
     } else {  // if (response_flag) {
       // Process message based on our framing and application.
       switch (msg_hdr.type()) {
-        case MsgHdr::TYPE_BASIC :
+        case MsgHdr::TYPE_BASIC :  // not used
           break;
 
         case MsgHdr::TYPE_HTTP :
-          {  // block protect case statement to make compiler happy
+          {  // block protect case statement inside of case statement
 
             // Note, if we encounter any errors from this point forward,
             // we need to issue an HTTP ERROR RESPONSE (see
@@ -233,9 +235,12 @@ bool conga_process_incoming_msg(ConfInfo* info, list<RequestInfo>* requests,
             string service = url.path();
             std::transform(service.begin(), service.end(), service.begin(), ::tolower);
 
+            // TODO(aka) Deprecated.
             // First, see if this is a WSDL service REQUEST, if so, mark it.
             //request_info.wsdl_request_ = http_hdr.IsWSDLRequest();
 
+            string ret_msg;
+            
             // Process message-body based on HTTP method & content-type.
             switch (http_hdr.method()) {
               case HTTPFraming::DELETE :
@@ -250,12 +255,13 @@ bool conga_process_incoming_msg(ConfInfo* info, list<RequestInfo>* requests,
               case HTTPFraming::GET :
                 {
                   if (!service.compare(kServiceAuth)) {
+                    ret_msg = conga_process_get_auth(*info, http_hdr, 
+                                                     msg_body, msg_data,
+                                                     flows, flow_list_mtx);
                   } else if (!service.compare(kServiceAllocations)) {
-                    RequestInfo request_info;  // XXX
-                    request_info.peer_ = peer->hostname();  // associate request with IP
-
-                    conga_process_get_allocations(*info, http_hdr, msg_body,
-                                                  msg_data, &request_info);
+                    ret_msg = conga_process_get_allocations(*info, http_hdr,
+                                                            msg_body, msg_data, 
+                                                            flows, flow_list_mtx);
                   } else {
                     // Report the error.  NACK sent outside of switch() {} block.
                     error.Init(EX_SOFTWARE, "conga_process_incoming_msg(): "
@@ -268,13 +274,13 @@ bool conga_process_incoming_msg(ConfInfo* info, list<RequestInfo>* requests,
               case HTTPFraming::POST :
                 {
                   if (!service.compare(kServiceAuth)) {
-                    conga_process_post_auth(*info, http_hdr, msg_body, 
-                                            msg_data, requests);
+                    ret_msg = conga_process_post_auth(*info, http_hdr, 
+                                                      msg_body, msg_data,
+                                                      ssl_context, flows, flow_list_mtx);
                   } else if (!service.compare(kServiceAllocations)) {
-                    RequestInfo request_info;  // XXX
-                    request_info.peer_ = peer->hostname();  // associate request with IP
-                    conga_process_post_allocations(*info, http_hdr, msg_body,
-                                                   msg_data, &request_info);
+                    ret_msg = conga_process_post_allocations(*info, http_hdr, 
+                                                             msg_body, msg_data,
+                                                             flows, flow_list_mtx);
                   } else {
                     // Report the error.  NACK sent outside of switch() {} block.
                     error.Init(EX_SOFTWARE, "conga_process_incoming_msg(): "
@@ -309,21 +315,21 @@ bool conga_process_incoming_msg(ConfInfo* info, list<RequestInfo>* requests,
               // and wait for its removal back in the main event-loop.
 
               error.AppendMsg("conga_process_incoming_msg()");
-                    RequestInfo request_info;  // XXX
-                    request_info.peer_ = peer->hostname();  // associate request with IP
-              conga_gen_http_error_response(*info, request_info, http_hdr, peer);
+              conga_gen_http_error_response(*info, http_hdr, peer);
               if (error.Event()) {
                 // Report the non-NACKable error.
                 error.Init(EX_SOFTWARE, "conga_process_incoming_msg(): "
                            "unable to send NACK to %s: %s",
                            peer->print().c_str(), error.print().c_str());
               }
+#if 0  // Deprecated
             } else if (request_info.wsdl_request_) {
               // Build the message RESPONSE for WSDL services.
               conga_gen_wsdl_response(*info, request_info, http_hdr, peer);
+#endif
             } else {
               // Build the message RESPONSE as an HTTP message.
-              conga_gen_http_response(*info, request_info, http_hdr, peer);
+              conga_gen_http_response(*info, http_hdr, ret_msg, peer);
 
               // ... and log what we processed.
               logger.Log(LOG_NOTICE, "Processed HTTP REQUEST (%s) from %s; "
@@ -420,9 +426,9 @@ void* conga_concurrent_process_incoming_msg(void* ptr) {
 //
 // TOOD(aka) We only need the HTTPFraming header in here, not MsgHdr ...
 void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
-                           const string& msg_body, const File& msg_data,
-                           list<SSLSession>::iterator peer, 
-                           list<MsgHdr>::iterator req_hdr) {
+                            const string& msg_body, const File& msg_data,
+                            list<SSLSession>::iterator peer, 
+                            list<MsgHdr>::iterator req_hdr) {
   if (msg_hdr.http_hdr().status_code() == 200) {
     // If we have a file, report its successful return.
     if (msg_data.Exists(NULL) && msg_data.size(NULL) > 0)
@@ -462,130 +468,366 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
   exit(EXIT_SUCCESS);  // for now, just exit; 
 }
 
+
 // Process requests based on RESTful API.
 
-// Process the kServiceRequestToken service & "message-body" in our message.
-void conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& http_hdr,
-                                   const string& msg_body, const File& msg_data,
-                                   RequestInfo* request_info) {
+// Routine to authorize a user for a future flow generation.
+string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
+                               const string& msg_body, const File& msg_data,
+                               SSLContext* ssl_context,
+                               list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx) {
   URL url = http_hdr.uri();
-
-  // Get the allocation_id if the user specified one in the RESTful request.
-  list<struct url_query_info> queries = url.query();
-  list<struct url_query_info>::iterator itr = queries.begin();
-  while (itr != queries.end()) {
-    string key = itr->key;
-    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-    if (!key.compare(kDetailAllocationID)) {
-      request_info->allocation_id_ = itr->value;
-    } else {
-      logger.Log(LOG_WARN, "conga_process_get_allocations(): Received unknown query: %s=%s.",
-                 key.c_str(), itr->value.c_str());
-    }
-
-    itr++;
-  }
 
   // Parse JSON message-body.
   rapidjson::Document details;
   if (details.Parse(msg_body.c_str()).HasParseError()) {
-    error.Init(EX_DATAERR, "conga_process_get_allocations(): "
+    error.Init(EX_DATAERR, "conga_process_post_auth(): "
                "Failed to parse JSON: %s", msg_body.c_str());
+    return "";
+  }
+
+  if (!details.HasMember(kDetailUserID) || !details[kDetailUserID].IsString() ||
+      !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString() ||
+      !details.HasMember(kDetailResourceID) || !details[kDetailResourceID].IsString()) {
+    error.Init(EX_DATAERR, "conga_process_post_auth(): "
+               "%s, %s or %s is invalid: %s", 
+               kDetailUserID, kDetailProjectID, kDetailResourceID, msg_body.c_str());
+    return "";
+  }
+
+  // See if they requested a renewal.
+  if (details.HasMember(kDetailAPIKey) && details[kDetailAPIKey].IsString()) {
+    // Since we're just reading flows, we don't need a lock.
+    list<FlowInfo>::iterator flow_itr = flows->begin();
+    while (flow_itr != flows->end()) {
+      string key = flow_itr->api_key_;
+      std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+      if (!key.compare(details[kDetailAPIKey].GetString())) {
+        found++;
+        break;
+      }
+
+      flow_itr++;
+    }
+
+    if (flow_itr == flows->end()) {
+      // They requested a renewal, but we have no record of this key!
+      error.Init(EX_DATAERR, "conga_process_post_auth(): "
+                 "API Key: %s, not found", details[kDetailAPIKey].GetString());
+      return "";
+    }
+  }
+
+  logger.Log(LOG_DEBUG, "conga_process_post_auth(): "
+             "working on user: %s, project: %s, resource: %s.",
+             details[kDetailUserID].GetString(), 
+             details[kDetailProjectID].GetString(),
+             details[kDetailResourceID].GetString());
+
+  // See if user is (still) an authorized user.
+
+  // Setup SSL connection.
+  const string auth_db_host = "dirsdev.psc.edu";
+  SSLSession tmp_session(MsgHdr::TYPE_HTTP);
+  tmp_session.Init();  // set aside buffer space
+  tmp_session.SSLConn::Init(ssl_context, auth_db_host.c_str(), AF_INET, 
+                            IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
+  tmp_session.set_port(443);
+  tmp_session.set_blocking();
+  tmp_session.Socket(PF_INET, SOCK_STREAM, 0);
+  //tmp_session.set_handle(tmp_session.fd());  // for now, set it to the socket
+  if (error.Event()) {
+    error.AppendMsg("conga_process_post_auth(): ");
     return;
   }
 
-  if (request_info->allocation_id_.size() > 0) {
-    if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString()) {
-      error.Init(EX_DATAERR, "conga_process_get_allocations(): %s is invalid: %s",
-                 kDetailAPIKey, msg_body.c_str());
+  // Build a (HTTP) framing header and load the framing header into
+  // our TCPSession's MsgHdr list.
+  //
+  // example: https://dirsdev.psc.edu/dances/api/v1/resource/blacklight.psc.teragrid/username/akadams/grant_number/TG-MCB110157
+
+  URL auth_db_url;
+  char tmp_buf[kURLMaxSize];
+  snprintf(tmp_buf, kURLMaxSize, "%s/resource/%s/username/%s/grant_number/%s",
+           kServiceDancesAuth, details[kDetailResourceID].GetString(),
+           details[kDetailUserID].GetString(), details[kDetailProjectID].GetString());
+  auth_db_url.Init("https", auth_db_host.c_str(), 443, tmp_buf, strlen(tmp_buf), NULL);
+  HTTPFraming auth_http_hdr;
+  auth_http_hdr.InitRequest(HTTPFraming::GET, auth_db_url);
+
+  // Add HTTP content-length message-headers (for an empty message-body).
+  struct rfc822_msg_hdr mime_msg_hdr;
+  mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
+  mime_msg_hdr.field_value = "0";
+  auth_http_hdr.AppendMsgHdr(mime_msg_hdr);
+
+  logger.Log(LOG_DEBUG, "conga_process_post_auth(): Generated HTTP headers:\n%s", auth_http_hdr.print_hdr(0).c_str());
+
+  MsgHdr tmp_msg_hdr(MsgHdr::TYPE_HTTP);
+  tmp_msg_hdr.Init(++msg_id_hash, http_hdr);
+  tmp_session.AddMsgBuf(http_hdr.print_hdr(0).c_str(), http_hdr.hdr_len(), 
+                        "", 0, tmp_msg_hdr);
+
+  // HACK: Normally, we would add our REQUEST message to our
+  // outgoing TCPSession list (to_peers), and then go back to wait
+  // for transmission in the event-loop, processing the results in
+  // conga_process_response().  However, doing that would require us
+  // to (i) pass to_peers, from_peers & list<FlowInfo> into
+  // *_process_incoming_msg(), and (ii) be able to associate the
+  // FlowInfo between the two SSL lists (which could be done via
+  // the MsgHdr msg_id!).  So, for now, we're just going to
+  // sequentially turn around and ask the auth server for a response
+  // in here.
+
+  logger.Log(LOG_INFO, "Sending HTTP REQUEST \'%s\n%s\' to %s.", 
+             http_hdr.print_start_line().c_str(), 
+             http_hdr.print_msg_hdrs().c_str(), 
+             tmp_session.SSLConn::print().c_str());
+
+  // Okay, try and connect, then send out our request.
+  tmp_session.Connect();
+  tmp_session.Write();
+  if (error.Event()) {
+    error.AppendMsg("conga_process_post_auth(): ");
+    return;
+  }
+
+  // If we made it here, hang around to get our response ...
+  bool eof = false;
+  ssize_t bytes_read = 0;
+  bytes_read = tmp_session.Read(&eof);
+  if (error.Event()) {
+    error.AppendMsg("conga_process_post_auth(): ");
+    return;
+  }
+
+  tmp_session.Close();
+
+  logger.Log(LOG_DEBUG, "conga_process_post_auth(): Read %ld byte(s) from %s, rbuf_len: %ld, eof: %d.", bytes_read, tmp_session.hostname().c_str(), tmp_session.rbuf_len(), eof);
+
+  // Parse JSON message-body.
+  rapidjson::Document response;
+  if (response.Parse(tmp_session.rbuf()).HasParseError()) {
+    error.Init(EX_DATAERR, "conga_process_post_auth(): Failed to parse JSON from %s: %s",
+               tmp_session.hostname().c_str(), tmp_session.rbuf());
+    return;
+  }
+
+  if (!response.HasMember(kDetailIsActive) || !response[kDetailIsActive].IsBool()) {
+    error.Init(EX_DATAERR, "conga_process_post_auth(): %s is invalid: %s", 
+               kDetailIsActive, tmp_session.rbuf());
+    return;
+  }
+
+  if (!response[kDetailIsActive].GetBool()) {
+    error.Init(EX_DATAERR, "conga_process_post_auth(): "
+               "Authorization failure with request %s", auth_db_url.print().c_str());
+    return;
+  }
+
+  // Setup auth variables.
+  string ret_msg(kHTTPMsgBodyMaxSize, '\0');
+  int status = 0;
+  string state = "running";  // TODO(aka) Does this even make sense in an auth request?
+  int duration = 900;  // TODO(aka) 15 mins (make a const or parameter?)
+  time_t start_time = time(NULL);
+  time_t end_time = start_time + (time_t)duration;
+
+  // Build POST AUTH results, depending on whether this is a new
+  // request, or the user has an existing api-key.
+
+  if (details.HasMember(kDetailAPIKey) && details[kDetailAPIKey].IsString()) {
+    // Reaquire the iterator from flows for our key, as another
+    // thread may have mucked with flows since our earlier check.
+
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_post_auth: requesting request list lock.");
+#endif
+    pthread_mutex_lock(&flow_list_mtx);
+    list<FlowInfo>::iterator flow_itr = flows->begin();
+    while (flow_itr != flows->end()) {
+      string key = flow_itr->api_key_;
+      std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+      if (!key.compare(details[kDetailAPIKey].GetString()))
+        break;
+
+      flow_itr++;
+    }
+
+    if (flow_itr == flows->end()) {
+      // This should never happen, but hey, who knows in MT land.
+      error.Init(EX_DATAERR, "conga_process_post_auth(): "
+                 "API Key: %s, is now missing", details[kDetailAPIKey].GetString());
+#if DEBUG_MUTEX_LOCK
+      warnx("conga_process_post_auth: releasing request list lock.");
+#endif
+      pthread_mutex_unlock(&flow_list_mtx);
       return;
     }
 
-    request_info->api_key_ = details[kDetailAPIKey].GetString();
+    // Update our expiration (note, we leave start_time_ unchanged).
+    flow_itr->end_time_ = end_time;
 
-    // Build allocation response ...
-    logger.Log(LOG_EMERG, "conga_process_get_allocations(): TODO(aka) Add code to get status!");
-
-    int status = 0;
-    string state = "running";
-    string results(1024, '\0');
-    snprintf((char*)results.c_str(), 1023, "{ \"status\":%d, \"results\": [ { "
+    snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ { "
              "\"%s\":\"%s\", "
              "\"%s\": %d, \"%s\": %d, "
-             "\"%s\":\"%s\", "
-             "\"%s\":%d, "
-             "\"%s\":\"%s\", \"%s\":\"%s\", "
-             "\"%s\":\"%s\", \"%s\":%d, "
-             "\"%s\":\"%s\", \"%s\":%d, "
-             "\"%s\":%d, "
+             "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
              "} ] }", 
-             status, kDetailAllocationID, request_info->allocation_id_.c_str(),
-             kDetailStartTime, request_info->start_time_, kDetailEndTime, request_info->end_time_,
-             kDetailState, state.c_str(), 
-             kDetailBandwidth, request_info->bandwidth_,
-             kDetailUserID, request_info->user_id_.c_str(),
-             kDetailProjectID, request_info->project_id_.c_str(),
-             kDetailSrcIP, request_info->src_ip_.c_str(), kDetailSrcPort, request_info->src_port_,
-             kDetailDstIP, request_info->dst_ip_.c_str(), kDetailDstPort, request_info->dst_port_,
-             kDetailDuration, request_info->duration_);
-    request_info->results_ = results;  // XXX Instead of putting our response in results, perhaps we just return the string from the routine?  Because it really makes no sense that this response message would have anything to do with a FlowInfo or FlowRequest or Tokens or APIKeys or whatever we're using as a key.  As far as return codes, an Error.Event would signify returning a 404.
+             status, kDetailAPIKey, flow_itr->api_key_.c_str(), 
+             kDetailStartTime, flow_itr->start_time_, 
+             kDetailEndTime, flow_itr->end_time_,
+             kDetailUserID, flow_itr->user_id_.c_str(),
+             kDetailProjectID, flow_itr->project_id_.c_str(),
+             kDetailResourceID, flow_itr->resource_id_.c_str());
 
-    logger.Log(LOG_NOTICE, "Processed GET allocations (%s:%s, %s:%s) from %s.",
-               kDetailAllocationID, request_info->allocation_id_.c_str(),
-               kDetailAPIKey, request_info->api_key_.c_str(),
-               request_info->peer_.c_str());
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_post_auth: releasing request list lock.");
+#endif
+    pthread_mutex_unlock(&flow_list_mtx);
+
+    logger.Log(LOG_NOTICE, "Processed POST auth (%s:%s, %s:%s, %s:%s) from %s.",
+               kDetailUserID, itr->user_id_.c_str(),
+               kDetailProjectID, itr->project_id_.c_str(),
+               kDetailResourceID, itr->resource_id_.c_str(),
+               peer_.c_str());
   } else {
-    if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString() ||
-        !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString()) {
-      error.Init(EX_DATAERR, "conga_process_get_allocations(): %s or %s is invalid: %s",
-                 kDetailAPIKey, kDetailProjectID, msg_body.c_str());
-      return;
-    }
+    FlowInfo new_request;
+    new_request.api_key_ = gen_random_string(kAPIKeySize);
+    new_request.user_id_ = details[kDetailUserID].GetString();
+    new_request.project_id_ = details[kDetailProjectID].GetString();
+    new_request.resource_id_ = details[kDetailResourceID].GetString();
+    //new_request.msg_hdr_id_ = msg_id_hash;  // XXX Do we need this?
 
-    request_info->api_key_ = details[kDetailAPIKey].GetString();
-    request_info->project_id_ = details[kDetailProjectID].GetString();
+    new_request.start_time_ = start_time;
+    new_request.end_time_ = end_time;
 
-    // Build allocation response ...
-    logger.Log(LOG_EMERG, "conga_process_get_allocations(): TODO(aka) Add code to get status!");
-
-    // TODO(aka) Need to loop over all allocations returned ...
-
-    int status = 0;
-    string state = "running";
-    string results(1024, '\0');
-    snprintf((char*)results.c_str(), 1023, "{ \"status\":%d, \"results\": [ { "
+    snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ { "
              "\"%s\":\"%s\", "
              "\"%s\": %d, \"%s\": %d, "
-             "\"%s\":\"%s\", "
-             "\"%s\":%d, "
-             "\"%s\":\"%s\", \"%s\":\"%s\", "
-             "\"%s\":\"%s\", \"%s\":%d, "
-             "\"%s\":\"%s\", \"%s\":%d, "
-             "\"%s\":%d, "
+             "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
              "} ] }", 
-             status, kDetailAllocationID, request_info->allocation_id_.c_str(),
-             kDetailStartTime, request_info->start_time_, kDetailEndTime, request_info->end_time_,
-             kDetailState, state.c_str(), 
-             kDetailBandwidth, request_info->bandwidth_,
-             kDetailUserID, request_info->user_id_.c_str(),
-             kDetailProjectID, request_info->project_id_.c_str(),
-             kDetailSrcIP, request_info->src_ip_.c_str(), kDetailSrcPort, request_info->src_port_,
-             kDetailDstIP, request_info->dst_ip_.c_str(), kDetailDstPort, request_info->dst_port_,
-             kDetailDuration, request_info->duration_);
-    request_info->results_ = results;
+             status, kDetailAPIKey, new_request.api_key_.c_str(), 
+             kDetailStartTime, new_request.start_time_, 
+             kDetailEndTime, new_request.end_time_,
+             kDetailUserID, new_request.user_id_.c_str(),
+             kDetailProjectID, new_request.project_id_.c_str(),
+             kDetailResourceID, new_request.resource_id_.c_str());
 
-    logger.Log(LOG_NOTICE, "Processed GET allocations (%s:%s, %s:%s) from %s.",
-               kDetailAPIKey, request_info->api_key_.c_str(),
-               kDetailProjectID, request_info->project_id_.c_str(),
-               request_info->peer_.c_str());
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_post_auth: requesting request list lock.");
+#endif
+    pthread_mutex_lock(&flow_list_mtx);
+    flows->push_back(new_request);
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_post_auth: releasing request list lock.");
+#endif
+    pthread_mutex_unlock(&flow_list_mtx);
+
+    logger.Log(LOG_NOTICE, "Processed POST auth (%s:%s, %s:%s, %s:%s) from %s.",
+               kDetailUserID, new_request.user_id_.c_str(),
+               kDetailProjectID, new_request.project_id_.c_str(),
+               kDetailResourceID, new_request.resource_id_.c_str(),
+               peer_.c_str());
   }
 
   // Head back to conga_process_incoming_msg() to send RESPONSE out.
+  return ret_msg;
 }
 
-void conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& http_hdr,
-                                    const string& msg_body, const File& msg_data,
-                                    RequestInfo* request_info) {
+// Routine to ge the status of a user's token (api-key).
+void conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
+                            const string& msg_body, const File& msg_data,
+                            list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx) {
+  URL url = http_hdr.uri();
+
+  // Grab the API Key from the path (should be the last value).
+  size_t last_slash = url.path.find_last_of("/");
+  string api_key = url.path.substr(last_slash + 1);
+  if (api_key.size() <= 0) {
+    // They requested a renewal, but we have no record of this key!
+    error.Init(EX_DATAERR, "conga_process_get_auth(): "
+               "API Key not included in URL query: %s", url.print().c_str());
+    return "";
+  }
+
+#if 0  // Deprecated code: API Key use to be in the query as opposed to the path.
+  list<struct url_query_info> queries = url.query();
+  list<struct url_query_info>::iterator key_itr = queries.begin();
+  while (key_itr != queries.end()) {
+    string key = key_itr->key;
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    if (!key.compare(kDetailAPIKey)) {
+      request_info->api_key_ = key_itr->value;
+    } else {
+      logger.Log(LOG_WARN, "conga_process_get_auth(): Received unknown query: %s=%s.",
+                 key.c_str(), key_itr->value.c_str());
+    }
+
+    key_itr++;
+  }
+
+  if (key_itr == queries.end()) {
+    // They requested a renewal, but we have no record of this key!
+    error.Init(EX_DATAERR, "conga_process_get_auth(): "
+               "API Key not included in URL query: %s", url.print().c_str());
+    return "";
+  }
+#endif
+
+  // Find the Flow information for this key (note, as we're just
+  // reading, no locking necessary) ...
+
+  list<FlowInfo>::iterator flow_itr = flows->begin();
+  while (flow_itr != flows->end()) {
+    string key = flow_itr->api_key_;
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    if (!key.compare(api_key))
+      break;
+
+    flow_itr++;
+  }
+
+  if (flow_itr == flows->end()) {
+    // They requested a renewal, but we have no record of this key!
+    error.Init(EX_DATAERR, "conga_process_get_auth(): "
+               "API Key: %s, not found in state table", api_key.c_str());
+    return "";
+  }
+
+  logger.Log(LOG_DEBUG, "conga_process_get_auth(): "
+             "working on user: %s, project: %s, resource: %s.",
+             flow_itr->user_.c_str(), flow_itr->project_id_.c_str(), flow_itr->resource_id_.c_str());
+
+  string ret_msg(kHTTPMsgBodyMaxSize, '\0');
+  int status = 0;
+  string state = "running";
+
+  // Build the response.
+  snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ { "
+           "\"%s\":\"%s\", "
+           "\"%s\": %d, \"%s\": %d, "
+           "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
+           "} ] }", 
+           status, kDetailAPIKey, flow_itr->api_key_.c_str(), 
+           kDetailStartTime, flow_itr->start_time_, 
+           kDetailEndTime, flow_itr->end_time_,
+           kDetailUserID, flow_itr->user_id_.c_str(),
+           kDetailProjectID, flow_itr->project_id_.c_str(),
+           kDetailResourceID, flow_itr->resource_id_.c_str());
+
+  logger.Log(LOG_NOTICE, "Processed GET auth (%s:%s, %s:%s, %s:%s) from %s.",
+             kDetailAPIKey, flow_itr->api_key_.c_str(),
+             kDetailUserID, flow_itr->user_id_.c_str(),
+             kDetailProjectID, flow_itr->project_id_.c_str(),
+             peer_.c_str());
+
+  // Head back to conga_process_incoming_msg() to send RESPONSE out.
+  return ret_msg;
+}
+
+string conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& http_hdr,
+                                      const string& msg_body, const File& msg_data,
+                                      list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx) {
   URL url = http_hdr.uri();
 
   // Get the allocation_id if the user specified one in the RESTful request.
@@ -665,6 +907,7 @@ void conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& htt
     string state = "queued";
 
     int status = 0;
+  string ret_msg(kHTTPMsgBodyMaxSize, '\0');
     string results(1024, '\0');
     snprintf((char*)results.c_str(), 1023, "{ \"status\":%d, \"results\": [ { "
              "\"%s\":\"%s\", \"%s\":\"%s\" } ] }",
@@ -686,286 +929,22 @@ void conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& htt
   // Head back to conga_process_incoming_msg() to send RESPONSE out.
 }
 
-void conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
-                             const string& msg_body, const File& msg_data,
-                             list<RequestInfo>* requests) {
+// Process the kServiceRequestToken service & "message-body" in our message.
+string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& http_hdr,
+                                     const string& msg_body, const File& msg_data,
+                                     list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx) {
   URL url = http_hdr.uri();
 
-  // Parse JSON message-body.
-  rapidjson::Document details;
-  if (details.Parse(msg_body.c_str()).HasParseError()) {
-    error.Init(EX_DATAERR, "conga_process_post_auth(): "
-               "Failed to parse JSON: %s", msg_body.c_str());
-    return;
-  }
-
-  if (!details.HasMember(kDetailUserID) || !details[kDetailUserID].IsString() ||
-      !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString() ||
-      !details.HasMember(kDetailResourceID) || !details[kDetailResourceID].IsString()) {
-    error.Init(EX_DATAERR, "conga_process_post_auth(): "
-               "%s, %s or %s is invalid: %s", 
-               kDetailUserID, kDetailProjectID, kDetailResourceID, msg_body.c_str());
-    return;
-  }
-
-  // See if they requested a renewal.
-  if (details.HasMember(kDetailAPIKey) && details[kDetailAPIKey].IsString()) {
-    list<RequestInfo>::iterator itr = requests->begin();
-    while (itr != requests->end()) {
-      string key = itr->api_key_;
-      std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-      if (!key.compare(details[kDetailAPIKey].GetString())) {
-        found++;
-        break;
-      }
-
-      itr++;
-    }
-
-    if (itr == requests->end()) {
-      // They request a renewal, but we have no record of this key!
-      error.Init(EX_DATAERR, "conga_process_post_auth(): "
-                 "API Key: %s, not found", details[kDetailAPIKey].GetString());
-      return;
-    }
-  }
-
-  logger.Log(LOG_DEBUG, "conga_process_post_auth(): "
-             "working on user: %s, project: %s, resource: %s.",
-             details[kDetailUserID].GetString(), 
-             details[kDetailProjectID].GetString(),
-             details[kDetailResourceID].GetString());
-
-  // See if user is (still) an authorized user.
-
-  // Setup SSL connection.
-  const string auth_db_host = "dirsdev.psc.edu";
-  SSLSession tmp_session(MsgHdr::TYPE_HTTP);
-  tmp_session.Init();  // set aside buffer space
-  tmp_session.SSLConn::Init(ssl_context, auth_db_host.c_str(), AF_INET, 
-                            IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
-  tmp_session.set_port(443);
-  tmp_session.set_blocking();
-  tmp_session.Socket(PF_INET, SOCK_STREAM, 0);
-  //tmp_session.set_handle(tmp_session.fd());  // for now, set it to the socket
-  if (error.Event()) {
-    error.AppendMsg("conga_process_post_auth(): ");
-    return;
-  }
-
-  // Build a (HTTP) framing header and load the framing header into
-  // our TCPSession's MsgHdr list.
-  //
-  // example: https://dirsdev.psc.edu/dances/api/v1/resource/blacklight.psc.teragrid/username/akadams/grant_number/TG-MCB110157
-
-  URL auth_db_url;
-  char tmp_buf[1024];
-  snprintf(tmp_buf, 1024, "%s/resource/%s/username/%s/grant_number/%s",
-           kServiceDancesAuth, details[kDetailResourceID].GetString(),
-           details[kDetailUserID].GetString(), details[kDetailProjectID].GetString());
-  auth_db_url.Init("https", auth_db_host.c_str(), 443, tmp_buf, strlen(tmp_buf), NULL);
-  HTTPFraming auth_http_hdr;
-  auth_http_hdr.InitRequest(HTTPFraming::GET, auth_db_url);
-
-  // Add HTTP content-length message-headers (for an empty message-body).
-  struct rfc822_msg_hdr mime_msg_hdr;
-  mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
-  mime_msg_hdr.field_value = "0";
-  auth_http_hdr.AppendMsgHdr(mime_msg_hdr);
-
-  logger.Log(LOG_DEBUG, "conga_process_post_auth(): Generated HTTP headers:\n%s", auth_http_hdr.print_hdr(0).c_str());
-
-  MsgHdr tmp_msg_hdr(MsgHdr::TYPE_HTTP);
-  tmp_msg_hdr.Init(++msg_id_hash, http_hdr);
-  tmp_session.AddMsgBuf(http_hdr.print_hdr(0).c_str(), http_hdr.hdr_len(), 
-                        "", 0, tmp_msg_hdr);
-
-  // HACK: Normally, we would add our REQUEST message to our
-  // outgoing TCPSession list (to_peers), and then go back to wait
-  // for transmission in the event-loop, processing the results in
-  // conga_process_response().  However, doing that would require us
-  // to (i) pass to_peers, from_peers & list<RequestInfo> into
-  // *_process_incoming_msg(), and (ii) be able to associate the
-  // RequestInfo between the two SSL lists (which could be done via
-  // the MsgHdr msg_id!).  So, for now, we're just going to
-  // sequentially turn around and ask the auth server for a response
-  // in here.
-
-  logger.Log(LOG_INFO, "Sending HTTP REQUEST \'%s\n%s\' to %s.", 
-             http_hdr.print_start_line().c_str(), 
-             http_hdr.print_msg_hdrs().c_str(), 
-             tmp_session.SSLConn::print().c_str());
-
-  // Okay, try and connect, then send out our request.
-  tmp_session.Connect();
-  tmp_session.Write();
-  if (error.Event()) {
-    error.AppendMsg("conga_process_post_auth(): ");
-    return;
-  }
-
-  // If we made it here, hang around to get our response ...
-  bool eof = false;
-  ssize_t bytes_read = 0;
-  bytes_read = tmp_session.Read(&eof);
-  if (error.Event()) {
-    error.AppendMsg("conga_process_post_auth(): ");
-    return;
-  }
-
-  tmp_session.Close();
-
-  logger.Log(LOG_DEBUG, "conga_process_post_auth(): Read %ld byte(s) from %s, rbuf_len: %ld, eof: %d.", bytes_read, tmp_session.hostname().c_str(), tmp_session.rbuf_len(), eof);
-
-  // Parse JSON message-body.
-  rapidjson::Document response;
-  if (response.Parse(tmp_session.rbuf()).HasParseError()) {
-    error.Init(EX_DATAERR, "conga_process_post_auth(): Failed to parse JSON from %s: %s",
-               tmp_session.hostname().c_str(), tmp_session.rbuf());
-    return;
-  }
-
-  if (!response.HasMember(kDetailIsActive) || !response[kDetailIsActive].IsBool()) {
-    error.Init(EX_DATAERR, "conga_process_post_auth(): %s is invalid: %s", 
-               kDetailIsActive, tmp_session.rbuf());
-    return;
-  }
-
-  if (!response[kDetailIsActive].GetBool()) {
-    error.Init(EX_DATAERR, "conga_process_post_auth(): "
-               "Authorization failure with request %s", auth_db_url.print().c_str());
-    return;
-  }
-
-  // Setup auth variables.
-  string results(1024, '\0');
-  int status = 0;
-  string state = "running";  // TODO(aka) Does this even make sense in an auth request?
-  int duration = 900;  // TODO(aka) 15 mins (make a const or parameter?)
-  time_t start_time = time(NULL);
-  time_t end_time = start_time + (time_t)duration;
-
-  // Build POST AUTH results, depending on whether this is a new
-  // request, or the user has an existing api-key.
-
-  if (details.HasMember(kDetailAPIKey) && details[kDetailAPIKey].IsString()) {
-    // Reaquire the iterator from requests for our key, as another
-    // thread may have mucked with requests since our earlier check.
-
-#if DEBUG_MUTEX_LOCK
-    warnx("conga_process_post_auth: requesting request list lock.");
-#endif
-    pthread_mutex_lock(&request_list_lock);
-    list<RequestInfo>::iterator itr = requests->begin();
-    while (itr != requests->end()) {
-      string key = itr->api_key_;
-      std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-      if (!key.compare(details[kDetailAPIKey].GetString())) {
-        found++;
-        break;
-      }
-
-      itr++;
-    }
-
-    if (itr == requests->end()) {
-      // This should never happen, but hey, who knows in MT land.
-      error.Init(EX_DATAERR, "conga_process_post_auth(): "
-                 "API Key: %s, is now missing", details[kDetailAPIKey].GetString());
-#if DEBUG_MUTEX_LOCK
-      warnx("conga_process_post_auth: releasing request list lock.");
-#endif
-      pthread_mutex_unlock(&request_list_lock);
-      return;
-    }
-
-    // Update our expiration (note, we leave start_time_ unchanged).
-    itr->end_time_ = end_time;
-
-    snprintf((char*)results.c_str(), 1023, "{ \"status\":%d, \"results\": [ { "
-             "\"%s\":\"%s\", "
-             "\"%s\": %d, \"%s\": %d, "
-             "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
-             "} ] }", 
-             status, kDetailAPIKey, itr->api_key_.c_str(), 
-             kDetailStartTime, itr->start_time_, 
-             kDetailEndTime, itr->end_time_,
-             kDetailUserID, itr->user_id_.c_str(),
-             kDetailProjectID, itr->project_id_.c_str(),
-             kDetailResourceID, itr->resource_id_.c_str());
-    itr->results_ = results;  // XXX
-
-#if DEBUG_MUTEX_LOCK
-    warnx("conga_process_post_auth: releasing request list lock.");
-#endif
-    pthread_mutex_unlock(&request_list_lock);
-
-    logger.Log(LOG_NOTICE, "Processed POST auth (%s:%s, %s:%s, %s:%s) from %s.",
-               kDetailUserID, itr->user_id_.c_str(),
-               kDetailProjectID, itr->project_id_.c_str(),
-               kDetailResourceID, itr->resource_id_.c_str(),
-               itr->peer_.c_str());
-  } else {
-    RequestInfo new_request;
-    new_request.peer_ = peer->hostname();  // associate request with IP
-    new_request.api_key_ = gen_random_string(kAPIKeySize);
-    new_request.user_id_ = details[kDetailUserID].GetString();
-    new_request.project_id_ = details[kDetailProjectID].GetString();
-    new_request.resource_id_ = details[kDetailResourceID].GetString();
-    new_request.msg_hdr_id_ = msg_id_hash;
-
-
-    new_request.start_time_ = start_time;
-    new_request.end_time_ = request_info.start_time_ + duration;
-
-    snprintf((char*)results.c_str(), 1023, "{ \"status\":%d, \"results\": [ { "
-             "\"%s\":\"%s\", "
-             "\"%s\": %d, \"%s\": %d, "
-             "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
-             "} ] }", 
-             status, kDetailAPIKey, new_request.api_key_.c_str(), 
-             kDetailStartTime, new_request.start_time_, 
-             kDetailEndTime, new_request.end_time_,
-             kDetailUserID, new_request.user_id_.c_str(),
-             kDetailProjectID, new_request.project_id_.c_str(),
-             kDetailResourceID, new_request.resource_id_.c_str());
-    new_request.results_ = results;
-
-#if DEBUG_MUTEX_LOCK
-    warnx("conga_process_post_auth: requesting request list lock.");
-#endif
-    pthread_mutex_lock(&request_list_lock);
-    requests->push_back(new_request);
-#if DEBUG_MUTEX_LOCK
-    warnx("conga_process_post_auth: releasing request list lock.");
-#endif
-    pthread_mutex_unlock(&request_list_lock);
-
-    logger.Log(LOG_NOTICE, "Processed POST auth (%s:%s, %s:%s, %s:%s) from %s.",
-               kDetailUserID, new_request.user_id_.c_str(),
-               kDetailProjectID, new_request.project_id_.c_str(),
-               kDetailResourceID, new_request.resource_id_.c_str(),
-               new_request.peer_.c_str());
-  }
-
-  // Head back to conga_process_incoming_msg() to send RESPONSE out.
-}
-
-void conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
-                             const string& msg_body, const File& msg_data,
-                             RequestInfo* request_info) {
-  URL url = http_hdr.uri();
-
-  // Get the api_key.
+  // Get the allocation_id if the user specified one in the RESTful request.
   list<struct url_query_info> queries = url.query();
   list<struct url_query_info>::iterator itr = queries.begin();
   while (itr != queries.end()) {
     string key = itr->key;
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-    if (!key.compare(kDetailAPIKey)) {
-      request_info->api_key_ = itr->value;
+    if (!key.compare(kDetailAllocationID)) {
+      request_info->allocation_id_ = itr->value;
     } else {
-      logger.Log(LOG_WARN, "conga_process_get_auth(): Received unknown query: %s=%s.",
+      logger.Log(LOG_WARN, "conga_process_get_allocations(): Received unknown query: %s=%s.",
                  key.c_str(), itr->value.c_str());
     }
 
@@ -975,167 +954,228 @@ void conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
   // Parse JSON message-body.
   rapidjson::Document details;
   if (details.Parse(msg_body.c_str()).HasParseError()) {
-    error.Init(EX_DATAERR, "conga_process_get_auth(): "
+    error.Init(EX_DATAERR, "conga_process_get_allocations(): "
                "Failed to parse JSON: %s", msg_body.c_str());
     return;
   }
 
-    if (!details.HasMember(kDetailUserID) || !details[kDetailUserID].IsString() ||
-        !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString()) {
-      error.Init(EX_DATAERR, "conga_process_get_auth(): "
-                 "%s or %s is invalid: %s", 
-                 kDetailUserID, kDetailProjectID, msg_body.c_str());
+  if (request_info->allocation_id_.size() > 0) {
+    if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString()) {
+      error.Init(EX_DATAERR, "conga_process_get_allocations(): %s is invalid: %s",
+                 kDetailAPIKey, msg_body.c_str());
       return;
     }
 
+    request_info->api_key_ = details[kDetailAPIKey].GetString();
 
-    logger.Log(LOG_DEBUG, "conga_process_get_auth(): working on user %s, project: %s.",
-               details[kDetailUserID].GetString(), 
-               details[kDetailProjectID].GetString());
+    // Build allocation response ...
+    logger.Log(LOG_EMERG, "conga_process_get_allocations(): TODO(aka) Add code to get status!");
 
-    request_info->user_id_ = details[kDetailUserID].GetString();
-    request_info->project_id_ = details[kDetailProjectID].GetString();
-
-    // See if user is an authorized user.
-
-    // Setup SSL connection.
-    // XXX This needs passed in!
-    const char* server_id = "conga-procs-tls";
-    SSLContext ssl_context;
-    ssl_context.Init(TLSv1_method(), server_id,
-                     "limbo.psc.edu.key.pem", "/home/pscnoc/conga/certs", SSL_FILETYPE_PEM, NULL, 
-                     "limbo.psc.edu.crt.pem", "/home/pscnoc/conga/certs", SSL_FILETYPE_PEM, 
-                     SSL_VERIFY_NONE, 2, SSL_SESS_CACHE_OFF, SSL_OP_CIPHER_SERVER_PREFERENCE);
-    const string auth_db_host = "dirsdev.psc.edu";
-    SSLSession tmp_session(MsgInfo::HTTP);
-    tmp_session.Init();  // set aside buffer space
-    tmp_session.SSLConn::Init(ssl_context, auth_db_host.c_str(), AF_INET, 
-                              IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
-    tmp_session.set_port(443);
-    tmp_session.set_blocking();
-    tmp_session.Socket(PF_INET, SOCK_STREAM, 0);
-    //tmp_session.set_handle(tmp_session.fd());  // for now, set it to the socket
-    if (error.Event()) {
-      error.AppendMsg("conga_process_get_auth(): ");
-      return;
-    }
-
-    // Build a (HTTP) framing header and load the framing header into
-    // our TCPSession's MsgHdr list.
-
-    URL auth_db_url;
-    auth_db_url.Init("https", auth_db_host.c_str(), 443, NULL, 0, NULL);
-    HTTPFraming http_hdr;
-    http_hdr.InitRequest(HTTPFraming::GET, auth_db_url);
-
-    // Add HTTP content-length message-headers (for an empty message-body).
-    struct rfc822_msg_hdr mime_msg_hdr;
-    mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
-    mime_msg_hdr.field_value = "0";
-    http_hdr.AppendMsgHdr(mime_msg_hdr);
-
-    logger.Log(LOG_DEBUG, "conga_process_get_auth(): Generated HTTP headers:\n%s", http_hdr.print_hdr(0).c_str());
-
-    MsgHdr tmp_msg_hdr(MsgHdr::TYPE_HTTP);
-    tmp_msg_hdr.Init(++msg_id_hash, http_hdr);
-    request_info->msg_hdr_id_ = msg_id_hash;
-
-    tmp_session.AddMsgBuf(http_hdr.print_hdr(0).c_str(), http_hdr.hdr_len(), 
-                          "", 0, tmp_msg_hdr);
-
-    // HACK: Normally, we would add our REQUEST message to our
-    // outgoing TCPSession list (to_peers), and then go back to wait
-    // for transmission in the event-loop, processing the results in
-    // conga_process_response().  However, doing that would require us
-    // to (i) pass to_peers, from_peers & list<RequestInfo> into
-    // *_process_incoming_msg(), and (ii) be able to associate the
-    // RequestInfo between the two SSL lists (which could be done via
-    // the MsgHdr msg_id!).  So, for now, we're just going to
-    // sequentially turn around and ask the auth server for a response
-    // in here.
-
-    logger.Log(LOG_INFO, "Sending HTTP REQUEST \'%s\n%s\' to %s.", 
-               http_hdr.print_start_line().c_str(), 
-               http_hdr.print_msg_hdrs().c_str(), 
-               tmp_session.SSLConn::print().c_str());
-
-    // Okay, try and connect, then send out our request.
-    tmp_session.Connect();
-    tmp_session.Write();
-    if (error.Event()) {
-      error.AppendMsg("conga_process_get_auth(): ");
-      return;
-    }
-
-    // If we made it here, hang around to get our response ...
-    bool eof = false;
-    ssize_t bytes_read = 0;
-    bytes_read = tmp_session.Read(&eof);
-    if (error.Event()) {
-      error.AppendMsg("conga_process_get_auth(): ");
-      return;
-    }
-
-    tmp_session.Close();
-
-    logger.Log(LOG_DEBUG, "conga_process_get_auth(): Read %ld byte(s) from %s, rbuf_len: %ld, eof: %d.", bytes_read, peer->hostname().c_str(), peer->rbuf_len(), eof);
-
-    xxx;
-  // Parse JSON message-body.
-  rapidjson::Document details;
-  if (details.Parse(msg_body.c_str()).HasParseError()) {
-    error.Init(EX_DATAERR, "conga_process_get_auth(): "
-               "Failed to parse JSON: %s", msg_body.c_str());
-    return;
-  }
-
-    if (!details.HasMember(kDetailUserID) || !details[kDetailUserID].IsString() ||
-        !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString()) {
-      error.Init(EX_DATAERR, "conga_process_get_auth(): "
-                 "%s or %s is invalid: %s", 
-                 kDetailUserID, kDetailProjectID, msg_body.c_str());
-      return;
-    }
-
-
-    logger.Log(LOG_DEBUG, "conga_process_get_auth(): working on user %s, project: %s.",
-               details[kDetailUserID].GetString(), 
-               details[kDetailProjectID].GetString());
-
-    request_info->user_id_ = details[kDetailUserID].GetString();
-    request_info->project_id_ = details[kDetailProjectID].GetString();
-
-
-    logger.Log(LOG_EMERG, "conga_process_get_auth(): TODO(aka) Add call to auth db!");
-
-    request_info->api_key_ = "FooBarKey";
-    request_info->start_time_ = time(NULL);
-    int duration = 900;  // 15 mins
-    request_info->end_time_ = request_info->start_time_ + duration;
     int status = 0;
     string state = "running";
-
+  string ret_msg(kHTTPMsgBodyMaxSize, '\0');
     string results(1024, '\0');
     snprintf((char*)results.c_str(), 1023, "{ \"status\":%d, \"results\": [ { "
              "\"%s\":\"%s\", "
              "\"%s\": %d, \"%s\": %d, "
+             "\"%s\":\"%s\", "
+             "\"%s\":%d, "
              "\"%s\":\"%s\", \"%s\":\"%s\", "
+             "\"%s\":\"%s\", \"%s\":%d, "
+             "\"%s\":\"%s\", \"%s\":%d, "
+             "\"%s\":%d, "
              "} ] }", 
-             status, kDetailAPIKey, request_info->api_key_.c_str(), 
-             kDetailStartTime, request_info->start_time_, 
-             kDetailEndTime, request_info->end_time_,
+             status, kDetailAllocationID, request_info->allocation_id_.c_str(),
+             kDetailStartTime, request_info->start_time_, kDetailEndTime, request_info->end_time_,
+             kDetailState, state.c_str(), 
+             kDetailBandwidth, request_info->bandwidth_,
              kDetailUserID, request_info->user_id_.c_str(),
-             kDetailProjectID, request_info->project_id_.c_str());
+             kDetailProjectID, request_info->project_id_.c_str(),
+             kDetailSrcIP, request_info->src_ip_.c_str(), kDetailSrcPort, request_info->src_port_,
+             kDetailDstIP, request_info->dst_ip_.c_str(), kDetailDstPort, request_info->dst_port_,
+             kDetailDuration, request_info->duration_);
+    request_info->results_ = results;  // XXX Instead of putting our response in results, perhaps we just return the string from the routine?  Because it really makes no sense that this response message would have anything to do with a FlowInfo or FlowRequest or Tokens or APIKeys or whatever we're using as a key.  As far as return codes, an Error.Event would signify returning a 404.
+
+    logger.Log(LOG_NOTICE, "Processed GET allocations (%s:%s, %s:%s) from %s.",
+               kDetailAllocationID, request_info->allocation_id_.c_str(),
+               kDetailAPIKey, request_info->api_key_.c_str(),
+               request_info->peer_.c_str());
+  } else {
+    if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString() ||
+        !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString()) {
+      error.Init(EX_DATAERR, "conga_process_get_allocations(): %s or %s is invalid: %s",
+                 kDetailAPIKey, kDetailProjectID, msg_body.c_str());
+      return;
+    }
+
+    request_info->api_key_ = details[kDetailAPIKey].GetString();
+    request_info->project_id_ = details[kDetailProjectID].GetString();
+
+    // Build allocation response ...
+    logger.Log(LOG_EMERG, "conga_process_get_allocations(): TODO(aka) Add code to get status!");
+
+    // TODO(aka) Need to loop over all allocations returned ...
+
+    int status = 0;
+    string state = "running";
+  string ret_msg(kHTTPMsgBodyMaxSize, '\0');
+    string results(1024, '\0');
+    snprintf((char*)results.c_str(), 1023, "{ \"status\":%d, \"results\": [ { "
+             "\"%s\":\"%s\", "
+             "\"%s\": %d, \"%s\": %d, "
+             "\"%s\":\"%s\", "
+             "\"%s\":%d, "
+             "\"%s\":\"%s\", \"%s\":\"%s\", "
+             "\"%s\":\"%s\", \"%s\":%d, "
+             "\"%s\":\"%s\", \"%s\":%d, "
+             "\"%s\":%d, "
+             "} ] }", 
+             status, kDetailAllocationID, request_info->allocation_id_.c_str(),
+             kDetailStartTime, request_info->start_time_, kDetailEndTime, request_info->end_time_,
+             kDetailState, state.c_str(), 
+             kDetailBandwidth, request_info->bandwidth_,
+             kDetailUserID, request_info->user_id_.c_str(),
+             kDetailProjectID, request_info->project_id_.c_str(),
+             kDetailSrcIP, request_info->src_ip_.c_str(), kDetailSrcPort, request_info->src_port_,
+             kDetailDstIP, request_info->dst_ip_.c_str(), kDetailDstPort, request_info->dst_port_,
+             kDetailDuration, request_info->duration_);
     request_info->results_ = results;
 
-    logger.Log(LOG_NOTICE, "Processed POST auth (%s:%s, %s:%s, %s:%s) from %s.",
+    logger.Log(LOG_NOTICE, "Processed GET allocations (%s:%s, %s:%s) from %s.",
                kDetailAPIKey, request_info->api_key_.c_str(),
-               kDetailUserID, request_info->user_id_.c_str(),
                kDetailProjectID, request_info->project_id_.c_str(),
                request_info->peer_.c_str());
+  }
 
   // Head back to conga_process_incoming_msg() to send RESPONSE out.
+  return ret_msg;
 }
+
+// Routine to encapsulate (frame) the REPONSE ERROR as a standard HTTP
+// message.
+//
+// This routine can set an ErrorHandler event.
+void conga_gen_http_error_response(const ConfInfo& info,
+                                  const RequestInfo& request_info, 
+                                  const HTTPFraming& http_hdr, 
+                                  list<SSLSession>::iterator peer) {
+  // Build ERROR message.
+  string msg(1024, '\0');  // '\0' so strlen() works
+  snprintf((char*)msg.c_str() + strlen(msg.c_str()),
+           1024 - strlen(msg.c_str()), 
+           "Unable to satisfy REQUEST \"%s\": %s",
+           http_hdr.print_start_line().c_str(), 
+           error.print().c_str());
+  error.clear();
+
+  // Setup HTTP RESPONSE message header.
+  HTTPFraming ack_hdr;
+  ack_hdr.InitResponse(500, HTTPFraming::CLOSE);
+
+  // Add HTTP content-type and content-length message-headers.
+  struct rfc822_msg_hdr mime_msg_hdr;
+  mime_msg_hdr.field_name = MIME_CONTENT_TYPE;
+  mime_msg_hdr.field_value = MIME_TEXT_PLAIN;    // XXX need to set this correctly
+  struct rfc822_parameter param;
+  param.key = MIME_CHARSET;
+  param.value = MIME_ISO_8859_1;
+  mime_msg_hdr.parameters.push_back(param);
+  ack_hdr.AppendMsgHdr(mime_msg_hdr);
+  if (error.Event()) {
+    error.AppendMsg("conga_gen_http_error_response()");
+    return;
+  }
+
+  param.key.clear();  // so we don't hose next msg-hdr
+  param.value.clear();
+
+  mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
+  char tmp_buf[64];
+  snprintf(tmp_buf, 64, "%ld", (long)strlen(msg.c_str())); 
+  mime_msg_hdr.field_value = tmp_buf;
+  ack_hdr.AppendMsgHdr(mime_msg_hdr);
+  if (error.Event()) {
+    error.AppendMsg("conga_gen_http_error_response()");
+    return;
+  }
+
+  //logger.Log(LOG_INFO, "conga_gen_http_error_response(): Generated HTTP headers:\n%s", http_hdr.print_hdr(0).c_str());
+
+  // Setup opaque MsgHdr for SSLSession, and add HTTP header to it.
+  MsgHdr ack_msg_hdr(MsgHdr::TYPE_HTTP);
+  ack_msg_hdr.Init(++msg_id_hash, ack_hdr);  // HTTP has no id
+  if (error.Event()) {
+    error.AppendMsg("conga_gen_http_error_response()");
+    return;
+  }
+
+  // And add the message to our SSLSession queue for transmission.
+  peer->AddMsgBuf(ack_hdr.print_hdr(0).c_str(), ack_hdr.hdr_len(), 
+                  msg.c_str(), strlen(msg.c_str()), ack_msg_hdr);
+  if (error.Event()) {
+    error.AppendMsg("conga_gen_http_error_response()");
+    return;  // AddMsgFile() throws events before updating peer
+  }
+
+  //logger.Log(LOG_INFO, "conga_gen_http_error_response(): %s is waiting transmission to %s, contents: %s", ack_hdr.print().c_str(), peer->print().c_str(), msg.c_str());
+
+  logger.Log(LOG_ERROR, "Returning ERROR \"%s\" to %s.", 
+             msg.c_str(), peer->print().c_str());
+}
+
+// Routine to encapsulate (frame) the REPONSE as a standard HTTP message.
+void conga_gen_http_response(const ConfInfo& info, const RequestInfo& request_info, 
+                             const HTTPFraming& http_hdr, const string msg,
+                             list<SSLSession>::iterator peer) {
+  // Setup HTTP RESPONSE message header.
+  HTTPFraming ack_hdr;
+  ack_hdr.InitResponse(200, HTTPFraming::CLOSE);
+
+  // Add HTTP content-type and content-length message-headers.
+  struct rfc822_msg_hdr mime_msg_hdr;
+  mime_msg_hdr.field_name = MIME_CONTENT_TYPE;
+  mime_msg_hdr.field_value = MIME_TEXT_PLAIN;
+  ack_hdr.AppendMsgHdr(mime_msg_hdr);
+  if (error.Event()) {
+    error.AppendMsg("conga_gen_http_response()");
+    return;
+  }
+
+  mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
+  char tmp_buf[64];
+  snprintf(tmp_buf, 64, "%ld", (long)msg.size());
+  mime_msg_hdr.field_value = tmp_buf;
+  ack_hdr.AppendMsgHdr(mime_msg_hdr);
+  if (error.Event()) {
+    error.AppendMsg("conga_gen_http_response()");
+    return;
+  }
+
+  // Setup opaque MsgHdr for SSLSession, and add HTTP header to it.
+  MsgHdr ack_msg_hdr(MsgHdr::TYPE_HTTP);
+  ack_msg_hdr.Init(++msg_id_hash, ack_hdr);  // HTTP has no id
+  if (error.Event()) {
+    error.AppendMsg("conga_gen_http_response()");
+    return;
+  }
+
+  // And add the message to our SSLSession queue for transmission.
+  peer->AddMsgBuf(ack_hdr.print_hdr(0).c_str(), ack_hdr.hdr_len(), 
+                  msg.c_str(), ack_hdr.msg_len(), ack_msg_hdr);
+  if (error.Event()) {
+    error.AppendMsg("conga_gen_http_response()");
+    return;  // AddMsgFile() throws events before updating peer
+  }
+
+  logger.Log(LOG_DEBUG, "conga_gen_http_response(): processed request %s; "
+             "%s is waiting transmission to %s, contents: %s", 
+             http_hdr.print_start_line().c_str(), 
+             ack_hdr.print().c_str(), peer->print().c_str(), 
+             msg.c_str());
+}
+
+
+#if 0  // Deprecated!
 
 // Process the text/plain "message-body" in our message.
 //
@@ -2337,129 +2377,6 @@ void conga_process_request(const ConfInfo& info, RequestInfo* request_info) {
 
 }
 
-// Routine to encapsulate (frame) the REPONSE ERROR as a standard HTTP
-// message.
-//
-// This routine can set an ErrorHandler event.
-void conga_gen_http_error_response(const ConfInfo& info,
-                                  const RequestInfo& request_info, 
-                                  const HTTPFraming& http_hdr, 
-                                  list<SSLSession>::iterator peer) {
-  // Build ERROR message.
-  string msg(1024, '\0');  // '\0' so strlen() works
-  snprintf((char*)msg.c_str() + strlen(msg.c_str()),
-           1024 - strlen(msg.c_str()), 
-           "Unable to satisfy REQUEST \"%s\": %s",
-           http_hdr.print_start_line().c_str(), 
-           error.print().c_str());
-  error.clear();
-
-  // Setup HTTP RESPONSE message header.
-  HTTPFraming ack_hdr;
-  ack_hdr.InitResponse(500, HTTPFraming::CLOSE);
-
-  // Add HTTP content-type and content-length message-headers.
-  struct rfc822_msg_hdr mime_msg_hdr;
-  mime_msg_hdr.field_name = MIME_CONTENT_TYPE;
-  mime_msg_hdr.field_value = MIME_TEXT_PLAIN;    // XXX need to set this correctly
-  struct rfc822_parameter param;
-  param.key = MIME_CHARSET;
-  param.value = MIME_ISO_8859_1;
-  mime_msg_hdr.parameters.push_back(param);
-  ack_hdr.AppendMsgHdr(mime_msg_hdr);
-  if (error.Event()) {
-    error.AppendMsg("conga_gen_http_error_response()");
-    return;
-  }
-
-  param.key.clear();  // so we don't hose next msg-hdr
-  param.value.clear();
-
-  mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
-  char tmp_buf[64];
-  snprintf(tmp_buf, 64, "%ld", (long)strlen(msg.c_str())); 
-  mime_msg_hdr.field_value = tmp_buf;
-  ack_hdr.AppendMsgHdr(mime_msg_hdr);
-  if (error.Event()) {
-    error.AppendMsg("conga_gen_http_error_response()");
-    return;
-  }
-
-  //logger.Log(LOG_INFO, "conga_gen_http_error_response(): Generated HTTP headers:\n%s", http_hdr.print_hdr(0).c_str());
-
-  // Setup opaque MsgHdr for SSLSession, and add HTTP header to it.
-  MsgHdr ack_msg_hdr(MsgHdr::TYPE_HTTP);
-  ack_msg_hdr.Init(++msg_id_hash, ack_hdr);  // HTTP has no id
-  if (error.Event()) {
-    error.AppendMsg("conga_gen_http_error_response()");
-    return;
-  }
-
-  // And add the message to our SSLSession queue for transmission.
-  peer->AddMsgBuf(ack_hdr.print_hdr(0).c_str(), ack_hdr.hdr_len(), 
-                  msg.c_str(), strlen(msg.c_str()), ack_msg_hdr);
-  if (error.Event()) {
-    error.AppendMsg("conga_gen_http_error_response()");
-    return;  // AddMsgFile() throws events before updating peer
-  }
-
-  //logger.Log(LOG_INFO, "conga_gen_http_error_response(): %s is waiting transmission to %s, contents: %s", ack_hdr.print().c_str(), peer->print().c_str(), msg.c_str());
-
-  logger.Log(LOG_ERROR, "Returning ERROR \"%s\" to %s.", 
-             msg.c_str(), peer->print().c_str());
-}
-
-// Routine to encapsulate (frame) the REPONSE as a standard HTTP message.
-void conga_gen_http_response(const ConfInfo& info, const RequestInfo& request_info, 
-                            const HTTPFraming& http_hdr, 
-                            list<SSLSession>::iterator peer) {
-  // Setup HTTP RESPONSE message header.
-  HTTPFraming ack_hdr;
-  ack_hdr.InitResponse(200, HTTPFraming::CLOSE);
-
-  // Add HTTP content-type and content-length message-headers.
-  struct rfc822_msg_hdr mime_msg_hdr;
-  mime_msg_hdr.field_name = MIME_CONTENT_TYPE;
-  mime_msg_hdr.field_value = MIME_TEXT_PLAIN;
-  ack_hdr.AppendMsgHdr(mime_msg_hdr);
-  if (error.Event()) {
-    error.AppendMsg("conga_gen_http_response()");
-    return;
-  }
-
-  mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
-  char tmp_buf[64];
-  snprintf(tmp_buf, 64, "%ld", (long)request_info.results_.size());
-  mime_msg_hdr.field_value = tmp_buf;
-  ack_hdr.AppendMsgHdr(mime_msg_hdr);
-  if (error.Event()) {
-    error.AppendMsg("conga_gen_http_response()");
-    return;
-  }
-
-  // Setup opaque MsgHdr for SSLSession, and add HTTP header to it.
-  MsgHdr ack_msg_hdr(MsgHdr::TYPE_HTTP);
-  ack_msg_hdr.Init(++msg_id_hash, ack_hdr);  // HTTP has no id
-  if (error.Event()) {
-    error.AppendMsg("conga_gen_http_response()");
-    return;
-  }
-
-  // And add the message to our SSLSession queue for transmission.
-  peer->AddMsgBuf(ack_hdr.print_hdr(0).c_str(), ack_hdr.hdr_len(), 
-                  request_info.results_.c_str(), ack_hdr.msg_len(), ack_msg_hdr);
-  if (error.Event()) {
-    error.AppendMsg("conga_gen_http_response()");
-    return;  // AddMsgFile() throws events before updating peer
-  }
-
-  logger.Log(LOG_DEBUG, "conga_gen_http_response(): processed request %s; "
-             "%s is waiting transmission to %s, contents: %s", 
-             http_hdr.print_start_line().c_str(), 
-             ack_hdr.print().c_str(), peer->print().c_str(), 
-             request_info.results_.c_str());
-}
-
 // Routine to encapsulate (frame) the RESPONSE as a WSDL-service
 // RESPONSE message.
 void conga_gen_wsdl_response(const ConfInfo& info, const RequestInfo& request_info, 
@@ -2523,7 +2440,7 @@ void conga_gen_wsdl_response(const ConfInfo& info, const RequestInfo& request_in
 
   mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
   char tmp_buf[64];
-  snprintf(tmp_buf, 64, "%ld", (long)request_info.results_.size());
+  snprintf(tmp_buf, 64, "%ld", (long)msg.size());
   mime_msg_hdr.field_value = tmp_buf;
   ack_hdr.AppendMsgHdr(mime_msg_hdr);
 
@@ -2548,8 +2465,6 @@ void conga_gen_wsdl_response(const ConfInfo& info, const RequestInfo& request_in
              http_hdr.print_start_line().c_str(), 
              peer->print().c_str());
 }
+#endif  // Deprecated!
 
 
-// Obsolete code.
-#if 0
-#endif

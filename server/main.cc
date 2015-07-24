@@ -52,8 +52,8 @@ const in_port_t kServerPort = CONGA_SERVER_PORT;
 
 int main(int argc, char* argv[]) {
   ConfInfo conf_info;           // configuration information
-  list<RequestInfo> requests;   // flow requests currently active
-  pthread_mutex_t request_list_mtx;
+  list<FlowInfo> flows;         // flows currently active
+  pthread_mutex_t flow_list_mtx;
   list<SSLSession> to_peers;    // initated connections (to other nodes)
   //pthread_mutex_t to_peers_mtx = PTHREAD_MUTEX_INITIALIZER;
   pthread_mutex_t to_peers_mtx;
@@ -85,7 +85,7 @@ int main(int argc, char* argv[]) {
 
   logger.set_proc_name("conga");
 
-  pthread_mutex_init(&request_list_mtx, NULL);
+  pthread_mutex_init(&flow_list_mtx, NULL);
   pthread_mutex_init(&to_peers_mtx, NULL);
   pthread_mutex_init(&from_peers_mtx, NULL);
   pthread_mutex_init(&thread_list_mtx, NULL);
@@ -364,7 +364,7 @@ int main(int argc, char* argv[]) {
                 !from_peer->IsIncomingMsgBeingProcessed()) {
               // Build struct for function arguments.
               struct conga_incoming_msg_args args = {
-                &conf_info, ssl_context, &requests, &request_list_mtx,
+                &conf_info, ssl_context, &flows, &flow_list_mtx,
                 &to_peers, &to_peers_mtx, from_peer, from_peers.end(), 
                 &thread_list, &thread_list_mtx,
               };
@@ -382,7 +382,8 @@ int main(int argc, char* argv[]) {
                          tid, from_peer->print().c_str());
             } else if (!conf_info.multi_threaded_) {
               // Process message single threaded.
-              conga_process_incoming_msg(&conf_info, ssl_context, &requests, &request_list_mtx, &to_peers, &to_peers, from_peer);
+              conga_process_incoming_msg(&conf_info, ssl_context, &flows, &flow_list_mtx,
+                                         &to_peers, &to_peers, from_peer);
               if (error.Event()) {
                 // Note, if we reached here, then we could not NACK the
                 // error we encountered processing the message in
@@ -676,7 +677,7 @@ int main(int argc, char* argv[]) {
           // all errors internally in ssl_event_accept().
 
           ssl_event_accept(conf_info, servers[j], kMaxPeers, kFramingType,
-                           &from_peers);
+                           ssl_context, &from_peers);
 #if DEBUG_MUTEX_LOCK
           warnx("main(listen): releasing from_peers lock.");
 #endif

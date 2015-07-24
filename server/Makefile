@@ -30,7 +30,7 @@ LIBS =  -lpthread -lssl
 CXXOPTIM =
 CXXPATH =
 
-OBJS = ssl-event-procs.o conga-procs.o server-funcs.o
+OBJS = FlowInfo.o ssl-event-procs.o conga-procs.o server-funcs.o
 
 all: conga
 
