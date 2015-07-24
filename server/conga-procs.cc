@@ -861,6 +861,8 @@ string conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& h
     return "";
   }
 
+  string ret_msg(kHTTPMsgBodyMaxSize, '\0');
+
   // Now, see if this is a create or renewal request ...
   if (allocation_id.size() > 0) {
     // User requested a renewal.
@@ -937,7 +939,6 @@ string conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& h
     flow_itr->allocation_id_ = "1234";
     string state = "queued";
     int status = 0;
-    string ret_msg(kHTTPMsgBodyMaxSize, '\0');
 
     // Build the response.
     snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ { "
