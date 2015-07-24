@@ -47,16 +47,19 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                             list<MsgHdr>::iterator req_hdr);
 string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                                const string& msg_body, const File& msg_data,
-                               SSLContext* ssl_context,
+                               SSLContext* ssl_context, list<SSLSession>::iterator peer, 
                                list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx);
 string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                               const string& msg_body, const File& msg_data,
+                              list<SSLSession>::iterator peer, 
                               list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx);
 string conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& http_hdr,
                                       const string& msg_body, const File& msg_data,
+                                      list<SSLSession>::iterator peer, 
                                       list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx);
 string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& http_hdr,
                                      const string& msg_body, const File& msg_data,
+                                     list<SSLSession>::iterator peer, 
                                      list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx);
 
 void conga_gen_http_error_response(const ConfInfo& info, const HTTPFraming& http_hdr, 

@@ -257,11 +257,11 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
                   if (!service.compare(kServiceAuth)) {
                     ret_msg = conga_process_get_auth(*info, http_hdr, 
                                                      msg_body, msg_data,
-                                                     flows, flow_list_mtx);
+                                                     peer, flows, flow_list_mtx);
                   } else if (!service.compare(kServiceAllocations)) {
                     ret_msg = conga_process_get_allocations(*info, http_hdr,
                                                             msg_body, msg_data, 
-                                                            flows, flow_list_mtx);
+                                                            peer, flows, flow_list_mtx);
                   } else {
                     // Report the error.  NACK sent outside of switch() {} block.
                     error.Init(EX_SOFTWARE, "conga_process_incoming_msg(): "
@@ -276,11 +276,12 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
                   if (!service.compare(kServiceAuth)) {
                     ret_msg = conga_process_post_auth(*info, http_hdr, 
                                                       msg_body, msg_data,
-                                                      ssl_context, flows, flow_list_mtx);
+                                                      ssl_context, peer,
+                                                      flows, flow_list_mtx);
                   } else if (!service.compare(kServiceAllocations)) {
                     ret_msg = conga_process_post_allocations(*info, http_hdr, 
                                                              msg_body, msg_data,
-                                                             flows, flow_list_mtx);
+                                                             peer, flows, flow_list_mtx);
                   } else {
                     // Report the error.  NACK sent outside of switch() {} block.
                     error.Init(EX_SOFTWARE, "conga_process_incoming_msg(): "
@@ -474,7 +475,7 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
 // Routine to authorize a user for a future flow generation.
 string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                                const string& msg_body, const File& msg_data,
-                               SSLContext* ssl_context,
+                               SSLContext* ssl_context, list<SSLSession>::iterator peer, 
                                list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx) {
   URL url = http_hdr.uri();
 
@@ -735,6 +736,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
 // Routine to ge the status of a user's token (api-key).
 string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                               const string& msg_body, const File& msg_data,
+                              list<SSLSession>::iterator peer, 
                               list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx) {
   URL url = http_hdr.uri();
 
@@ -825,6 +827,7 @@ string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
 
 string conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& http_hdr,
                                       const string& msg_body, const File& msg_data,
+                                      list<SSLSession>::iterator peer, 
                                       list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx) {
   URL url = http_hdr.uri();
 
@@ -965,6 +968,7 @@ string conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& h
 // Process the kServiceRequestToken service & "message-body" in our message.
 string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& http_hdr,
                                      const string& msg_body, const File& msg_data,
+                                     list<SSLSession>::iterator peer, 
                                      list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx) {
   URL url = http_hdr.uri();
 
