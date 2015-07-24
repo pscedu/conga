@@ -15,7 +15,7 @@
 
 // Accessors & mutators.
 void FlowInfo::clear(void) {
-  allocations_id_.clear();
+  allocation_id_.clear();
 
   api_key_.clear();
   user_id_.clear();
