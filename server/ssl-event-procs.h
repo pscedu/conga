@@ -31,7 +31,7 @@ ssl_event_poll_get_peer(const ConfInfo& info, const int fd,
                         list<SSLSession>* peers);
 int ssl_event_accept(const ConfInfo& info, const SSLConn& server, 
                      const int max_open_connections, const int framing,
-                     list<SSLSession>* from_peers);
+                     SSLContext* ssl_context, list<SSLSession>* from_peers);
 void ssl_event_read(const ConfInfo& info, list<SSLSession>::iterator peer);
 void ssl_event_write(const ConfInfo& info, list<SSLSession>::iterator peer);
 

@@ -529,11 +529,11 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
   const string auth_db_host = "dirsdev.psc.edu";
   SSLSession tmp_session(MsgHdr::TYPE_HTTP);
   tmp_session.Init();  // set aside buffer space
-  tmp_session.SSLConn::Init(ssl_context, auth_db_host.c_str(), AF_INET, 
+  tmp_session.SSLConn::Init(auth_db_host.c_str(), AF_INET, 
                             IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
   tmp_session.set_port(443);
   tmp_session.set_blocking();
-  tmp_session.Socket(PF_INET, SOCK_STREAM, 0);
+  tmp_session.Socket(PF_INET, SOCK_STREAM, 0, ssl_context->ctx());
   //tmp_session.set_handle(tmp_session.fd());  // for now, set it to the socket
   if (error.Event()) {
     error.AppendMsg("conga_process_post_auth(): ");

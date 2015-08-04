@@ -148,13 +148,13 @@ ssl_event_poll_get_peer(const ConfInfo& info, const int fd,
 // Routine to "accept()" a connection, and load it into our SSLSession list.
 int ssl_event_accept(const ConfInfo& info, const SSLConn& server, 
                      const int max_open_connections, const int framing,
-                     list<SSLSession>* from_peers) {
+                     SSLContext* ssl_context, list<SSLSession>* from_peers) {
   //logger.Log(LOG_DEBUGGING, "ssl_event_accept(): checking server's listen socket: %d.", server.fd());
 
   // Setup a temporary list<SSLSession> element.
   SSLSession tmp_peer(framing);
   tmp_peer.Init();  // set aside buffer space
-  server.Accept(&tmp_peer);  // call accept(2) to populate tmp_peer
+  server.Accept(&tmp_peer, ssl_context);  // call accept(2) to populate tmp_peer
   if (error.Event()) {
     logger.Log(LOG_NETWORK, "Unable to accept connection: %s.", 
                error.print().c_str());

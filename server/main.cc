@@ -163,10 +163,10 @@ int main(int argc, char* argv[]) {
   // Setup the server's listen socket(s).
   if (conf_info.v4_enabled_) {
     SSLConn tmp_server;
-    tmp_server.InitServer(ssl_context, AF_INET);  // listen on all IPv4 interfaces
+    tmp_server.InitServer(AF_INET);  // listen on all IPv4 interfaces
     tmp_server.set_blocking();
     tmp_server.set_close_on_exec();
-    tmp_server.Socket(PF_INET, SOCK_STREAM, 0);
+    tmp_server.Socket(PF_INET, SOCK_STREAM, 0, ssl_context);
     tmp_server.Bind(conf_info.port_);
     tmp_server.Listen(TCPCONN_DEFAULT_BACKLOG);
     if (error.Event()) {
@@ -178,10 +178,10 @@ int main(int argc, char* argv[]) {
   } 
   if (conf_info.v6_enabled_) {
     SSLConn tmp_server;
-    tmp_server.InitServer(ssl_context, AF_INET6);  // listen on all interfaces ...
+    tmp_server.InitServer(AF_INET6);  // listen on all interfaces ...
     tmp_server.set_blocking();
     tmp_server.set_close_on_exec();
-    tmp_server.Socket(PF_INET6, SOCK_STREAM, 0);
+    tmp_server.Socket(PF_INET6, SOCK_STREAM, 0, ssl_context);
     int v6_only = 1;
     tmp_server.Setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, &v6_only, 
                           sizeof(v6_only));  // ... *only* IPv6 interfaces
@@ -265,11 +265,11 @@ int main(int argc, char* argv[]) {
           const string ryu_host = "ryu.psc.edu";
           SSLSession tmp_session(MsgInfo::HTTP);
           tmp_session.Init();  // set aside buffer space
-          tmp_session.SSLConn::Init(ssl_context, ryu_host.c_str(), AF_INET, 
+          tmp_session.SSLConn::Init(ryu_host.c_str(), AF_INET, 
                                     IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
           tmp_session.set_port(443);
           tmp_session.set_blocking();
-          tmp_session.Socket(PF_INET, SOCK_STREAM, 0);
+          tmp_session.Socket(PF_INET, SOCK_STREAM, 0, ssl_context);
           //tmp_session.set_handle(tmp_session.fd());  // for now, set it to the socket
           if (error.Event()) {
             logger.Log(LOG_ERR, "Failed to initialize peer %s:443: %s", 
