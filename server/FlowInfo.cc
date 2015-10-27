@@ -18,13 +18,8 @@ void FlowInfo::clear(void) {
   allocation_id_.clear();
 
   api_key_.clear();
-  user_id_.clear();
-  project_id_.clear();
-  resource_id_.clear();
 
   bandwidth_ = 0;
-  start_time_ = 0;
-  end_time_ = 0;
   //expires_in_.clear();
   duration_ = 0;
 

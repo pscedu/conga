@@ -52,7 +52,7 @@ using namespace xercesc;
 
 static const char* kServiceAllocations = "allocations";
 static const char* kServiceAuth = "auth";
-static const char* kServiceDancesAuth = "api/v1/dances";
+static const char* kServiceDancesAuth = "dances/api/v1";
 
 static const char* kDetailAPIKey = "api_key";
 static const char* kDetailUserID = "user_id";
@@ -77,6 +77,7 @@ static const char* kDetailIsActive = "is_active";
 
 static const size_t kAPIKeySize = 16;
 
+static size_t allocation_id_cnt = 0;
 
 // Routine to process a ready (incoming) message in our SSLSession
 // object.  This routine must deal with both the message framing *and*
@@ -85,8 +86,12 @@ static const size_t kAPIKeySize = 16;
 //
 // This routine can set an ErrorHandler event.
 bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context, 
-                                list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx,
-                                list<SSLSession>* to_peers, pthread_mutex_t* to_peers_mtx,
+                                list<AuthInfo>* api_keys, 
+                                pthread_mutex_t* api_keys_mtx,
+                                list<FlowInfo>* flows,
+                                pthread_mutex_t* flow_list_mtx,
+                                list<SSLSession>* to_peers,
+                                pthread_mutex_t* to_peers_mtx, 
                                 list<SSLSession>::iterator peer) {
   if (&(*peer) == NULL) {  // note iterator hack
     error.Init(EX_SOFTWARE, "conga_process_incoming_msg(): peer is NULL");
@@ -228,8 +233,10 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
             HTTPFraming http_hdr = msg_hdr.http_hdr();
             URL url = http_hdr.uri();
 
-            logger.Log(LOG_INFO, "Received REQUEST (%s) from %s, content-type: %s.",
-                       http_hdr.print_start_line().c_str(), peer->hostname().c_str(), 
+            logger.Log(LOG_INFO, "Received REQUEST (%s) from %s, "
+                       "content-type: %s.",
+                       http_hdr.print_start_line().c_str(),
+                       peer->hostname().c_str(), 
                        http_hdr.content_type().c_str());
 
             string service = url.path();
@@ -243,49 +250,75 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
             
             // Process message-body based on HTTP method & content-type.
             switch (http_hdr.method()) {
-              case HTTPFraming::DELETE :
+              case HTTPFraming::POST :
                 {
-                  // Report the error.  NACK sent outside of switch() {} block.
-                  error.Init(EX_SOFTWARE, "conga_process_incoming_msg(): "
-                             "No support for DELETE service \'%s\'",
-                             service.c_str());
-                }
-                break;
-
-              case HTTPFraming::GET :
-                {
-                  if (!service.compare(kServiceAuth)) {
-                    ret_msg = conga_process_get_auth(*info, http_hdr, 
-                                                     msg_body, msg_data,
-                                                     peer, flows, flow_list_mtx);
-                  } else if (!service.compare(kServiceAllocations)) {
-                    ret_msg = conga_process_get_allocations(*info, http_hdr,
-                                                            msg_body, msg_data, 
-                                                            peer, flows, flow_list_mtx);
+                  if (!service.compare(0, strlen(kServiceAuth), kServiceAuth)) {
+                    ret_msg = conga_process_post_auth(*info, http_hdr, 
+                                                      msg_body, msg_data,
+                                                      ssl_context,
+                                                      api_keys, api_keys_mtx,
+                                                      peer);
+                  } else if (!service.compare(0, strlen(kServiceAllocations),
+                                              kServiceAllocations)) {
+                    ret_msg =
+                        conga_process_post_allocations(*info, http_hdr, 
+                                                       msg_body, msg_data,
+                                                       api_keys, api_keys_mtx,
+                                                       flows, flow_list_mtx,
+                                                       peer);
                   } else {
                     // Report the error.  NACK sent outside of switch() {} block.
                     error.Init(EX_SOFTWARE, "conga_process_incoming_msg(): "
-                               "No support for GET service \'%s\'",
+                               "No support for POST service \'%s\'",
                                service.c_str());
                   }
                 }
                 break;
 
-              case HTTPFraming::POST :
+              case HTTPFraming::DELETE :
                 {
-                  if (!service.compare(kServiceAuth)) {
-                    ret_msg = conga_process_post_auth(*info, http_hdr, 
-                                                      msg_body, msg_data,
-                                                      ssl_context, peer,
-                                                      flows, flow_list_mtx);
-                  } else if (!service.compare(kServiceAllocations)) {
-                    ret_msg = conga_process_post_allocations(*info, http_hdr, 
-                                                             msg_body, msg_data,
-                                                             peer, flows, flow_list_mtx);
+                  printf("XXX service: %s.\n", service.c_str());
+                  if (!service.compare(0, strlen(kServiceAuth), kServiceAuth)) {
+                    ret_msg = conga_process_delete_auth(*info, http_hdr, 
+                                                        msg_body, msg_data,
+                                                        api_keys, api_keys_mtx, 
+                                                        peer);
+                  } else if (!service.compare(0, strlen(kServiceAllocations),
+                                              kServiceAllocations)) {
+                    ret_msg =
+                        conga_process_delete_allocations(*info, http_hdr,
+                                                         msg_body, msg_data, 
+                                                         api_keys, api_keys_mtx,
+                                                         flows, flow_list_mtx,
+                                                         peer);
                   } else {
                     // Report the error.  NACK sent outside of switch() {} block.
                     error.Init(EX_SOFTWARE, "conga_process_incoming_msg(): "
-                               "No support for POST service \'%s\'",
+                               "No support for DELETE service \'%s\'",
+                               service.c_str());
+                  }
+                }
+                break;
+
+              case HTTPFraming::GET :
+                {
+                  if (!service.compare(0, strlen(kServiceAuth), kServiceAuth)) {
+                    ret_msg = conga_process_get_auth(*info, http_hdr, 
+                                                     msg_body, msg_data,
+                                                     api_keys, api_keys_mtx, 
+                                                     peer);
+                  } else if (!service.compare(0, strlen(kServiceAllocations),
+                                              kServiceAllocations)) {
+                    ret_msg =
+                        conga_process_get_allocations(*info, http_hdr,
+                                                      msg_body, msg_data, 
+                                                      api_keys, api_keys_mtx,
+                                                      flows, flow_list_mtx,
+                                                      peer);
+                  } else {
+                    // Report the error.  NACK sent outside of switch() {} block.
+                    error.Init(EX_SOFTWARE, "conga_process_incoming_msg(): "
+                               "No support for GET service \'%s\'",
                                service.c_str());
                   }
                 }
@@ -384,7 +417,8 @@ void* conga_concurrent_process_incoming_msg(void* ptr) {
 
   // Process the *complete* message.
   conga_process_incoming_msg(args->info, args->ssl_context, 
-                             args->requests, args->request_list_mtx,
+                             args->api_keys, args->api_keys_mtx,
+                             args->flows, args->flow_list_mtx,
                              args->to_peers, args->to_peers_mtx, args->peer);
   if (error.Event()) {
     logger.Log(LOG_ERR, "conga_concurrent_process_incoming_msg(): "
@@ -475,8 +509,10 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
 // Routine to authorize a user for a future flow generation.
 string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                                const string& msg_body, const File& msg_data,
-                               SSLContext* ssl_context, list<SSLSession>::iterator peer, 
-                               list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx) {
+                               SSLContext* ssl_context,
+                               list<AuthInfo>* api_keys, 
+                               pthread_mutex_t* api_keys_mtx,
+                               list<SSLSession>::iterator peer) {
   URL url = http_hdr.uri();
 
   // Parse JSON message-body.
@@ -487,29 +523,34 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
     return "";
   }
 
-  if (!details.HasMember(kDetailUserID) || !details[kDetailUserID].IsString() ||
-      !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString() ||
-      !details.HasMember(kDetailResourceID) || !details[kDetailResourceID].IsString()) {
+  if (!details.HasMember(kDetailUserID) ||
+      !details[kDetailUserID].IsString() ||
+      !details.HasMember(kDetailProjectID) ||
+      !details[kDetailProjectID].IsString() ||
+      !details.HasMember(kDetailResourceID) ||
+      !details[kDetailResourceID].IsString()) {
     error.Init(EX_DATAERR, "conga_process_post_auth(): "
                "%s, %s or %s is invalid: %s", 
-               kDetailUserID, kDetailProjectID, kDetailResourceID, msg_body.c_str());
+               kDetailUserID, kDetailProjectID, 
+               kDetailResourceID, msg_body.c_str());
     return "";
   }
 
   // See if they requested a renewal.
   if (details.HasMember(kDetailAPIKey) && details[kDetailAPIKey].IsString()) {
-    // Since we're just reading flows, we don't need a lock.
-    list<FlowInfo>::iterator flow_itr = flows->begin();
-    while (flow_itr != flows->end()) {
-      string key = flow_itr->api_key_;
+    // Since we're just checking (reading) api_keys, we don't need a lock.
+    list<AuthInfo>::iterator api_key_itr = api_keys->begin();
+    while (api_key_itr != api_keys->end()) {
+      string key = api_key_itr->api_key_;
+      // API key is *not* case-sensitive!
       std::transform(key.begin(), key.end(), key.begin(), ::tolower);
       if (!key.compare(details[kDetailAPIKey].GetString()))
         break;
 
-      flow_itr++;
+      api_key_itr++;
     }
 
-    if (flow_itr == flows->end()) {
+    if (api_key_itr == api_keys->end()) {
       // They requested a renewal, but we have no record of this key!
       error.Init(EX_DATAERR, "conga_process_post_auth(): "
                  "API Key: %s, not found", details[kDetailAPIKey].GetString());
@@ -533,7 +574,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
                             IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
   tmp_session.set_port(443);
   tmp_session.set_blocking();
-  tmp_session.Socket(PF_INET, SOCK_STREAM, 0, ssl_context->ctx());
+  tmp_session.Socket(PF_INET, SOCK_STREAM, 0, ssl_context);
   //tmp_session.set_handle(tmp_session.fd());  // for now, set it to the socket
   if (error.Event()) {
     error.AppendMsg("conga_process_post_auth(): ");
@@ -549,38 +590,45 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
   char tmp_buf[kURLMaxSize];
   snprintf(tmp_buf, kURLMaxSize, "%s/resource/%s/username/%s/grant_number/%s",
            kServiceDancesAuth, details[kDetailResourceID].GetString(),
-           details[kDetailUserID].GetString(), details[kDetailProjectID].GetString());
-  auth_db_url.Init("https", auth_db_host.c_str(), 443, tmp_buf, strlen(tmp_buf), NULL);
+           details[kDetailUserID].GetString(),
+           details[kDetailProjectID].GetString());
+  auth_db_url.Init("https", auth_db_host.c_str(), 443,
+                   tmp_buf, strlen(tmp_buf), NULL, 0, NULL);
   HTTPFraming auth_http_hdr;
   auth_http_hdr.InitRequest(HTTPFraming::GET, auth_db_url);
 
+#if 0  // TODO(aka) Empty message body, so not needed.
   // Add HTTP content-length message-headers (for an empty message-body).
   struct rfc822_msg_hdr mime_msg_hdr;
   mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
   mime_msg_hdr.field_value = "0";
   auth_http_hdr.AppendMsgHdr(mime_msg_hdr);
+#endif
+  // Add Host message-header.
+  struct rfc822_msg_hdr mime_msg_hdr;
+  mime_msg_hdr.field_name = MIME_HOST;
+  mime_msg_hdr.field_value = auth_db_host;
+  auth_http_hdr.AppendMsgHdr(mime_msg_hdr);
 
   logger.Log(LOG_DEBUG, "conga_process_post_auth(): Generated HTTP headers:\n%s", auth_http_hdr.print_hdr(0).c_str());
 
   MsgHdr tmp_msg_hdr(MsgHdr::TYPE_HTTP);
-  tmp_msg_hdr.Init(++msg_id_hash, http_hdr);
-  tmp_session.AddMsgBuf(http_hdr.print_hdr(0).c_str(), http_hdr.hdr_len(), 
-                        "", 0, tmp_msg_hdr);
+  tmp_msg_hdr.Init(++msg_id_hash, auth_http_hdr);
+  tmp_session.AddMsgBuf(auth_http_hdr.print_hdr(0).c_str(),
+                        auth_http_hdr.hdr_len(), "", 0, tmp_msg_hdr);
 
-  // HACK: Normally, we would add our REQUEST message to our
-  // outgoing TCPSession list (to_peers), and then go back to wait
-  // for transmission in the event-loop, processing the results in
+  // HACK: Normally, we would add our REQUEST message to our outgoing
+  // TCPSession list (to_peers), and then go back to wait for
+  // transmission in the event-loop, processing the results in
   // conga_process_response().  However, doing that would require us
-  // to (i) pass to_peers, from_peers & list<FlowInfo> into
-  // *_process_incoming_msg(), and (ii) be able to associate the
-  // FlowInfo between the two SSL lists (which could be done via
-  // the MsgHdr msg_id!).  So, for now, we're just going to
-  // sequentially turn around and ask the auth server for a response
-  // in here.
+  // to be able to associate the AuthInfo between the two SSL lists
+  // (which I think could be done via the MsgHdr msg_id!).  So, for
+  // now, we're just going to sequentially turn around and ask the
+  // auth server for a response in here.
 
-  logger.Log(LOG_INFO, "Sending HTTP REQUEST \'%s\n%s\' to %s.", 
-             http_hdr.print_start_line().c_str(), 
-             http_hdr.print_msg_hdrs().c_str(), 
+  logger.Log(LOG_INFO, "Sending REQUEST: \'%s\n%s\' to %s.", 
+             auth_http_hdr.print_start_line().c_str(), 
+             auth_http_hdr.print_msg_hdrs().c_str(), 
              tmp_session.SSLConn::print().c_str());
 
   // Okay, try and connect, then send out our request.
@@ -594,33 +642,80 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
   // If we made it here, hang around to get our response ...
   bool eof = false;
   ssize_t bytes_read = 0;
-  bytes_read = tmp_session.Read(&eof);
-  if (error.Event()) {
-    error.AppendMsg("conga_process_post_auth(): ");
-    return "";
-  }
+  while (!eof) {
+    bytes_read = tmp_session.Read(&eof);
+    if (error.Event()) {
+      error.AppendMsg("conga_process_post_auth(): ");
+      return "";
+    }
+    if (bytes_read > 0) {
+      if (!tmp_session.IsIncomingMsgInitialized())
+        tmp_session.InitIncomingMsg();
+      if (error.Event()) {
+        error.AppendMsg("conga_process_post_auth(): ");
+        return "";
+      }
 
+      if (tmp_session.IsIncomingMsgComplete())
+        break;
+    }
+  }
   tmp_session.Close();
 
   logger.Log(LOG_DEBUG, "conga_process_post_auth(): Read %ld byte(s) from %s, rbuf_len: %ld, eof: %d.", bytes_read, tmp_session.hostname().c_str(), tmp_session.rbuf_len(), eof);
 
-  // Parse JSON message-body.
-  rapidjson::Document response;
-  if (response.Parse(tmp_session.rbuf()).HasParseError()) {
-    error.Init(EX_DATAERR, "conga_process_post_auth(): Failed to parse JSON from %s: %s",
-               tmp_session.hostname().c_str(), tmp_session.rbuf());
+  // Process the response.
+  if (!tmp_session.IsIncomingMsgInitialized()) {
+    error.Init(EX_DATAERR, "conga_process_post_auth(): "
+               "Not INITIALIZED: Failed to parse response from %s", 
+               tmp_session.hostname().c_str());
     return "";
   }
 
-  if (!response.HasMember(kDetailIsActive) || !response[kDetailIsActive].IsBool()) {
+  const MsgHdr msg_hdr = tmp_session.rhdr();
+  if (msg_hdr.http_hdr().status_code() != 200) {
+    error.Init(EX_DATAERR, "conga_process_post_auth(): "
+               "Communication failure with %s: %s",
+               tmp_session.hostname().c_str(),
+               tmp_session.rhdr().print().c_str());
+    return "";
+  }
+
+  // TODO(aka) Do we need to check for any specific message-headers?
+
+  // Get the message-body.
+  string auth_msg_body;
+  auth_msg_body.assign(tmp_session.rbuf(), tmp_session.rhdr().body_len());
+  tmp_session.ClearIncomingMsg();  // clean-up, just incase it gets used again
+
+  logger.Log(LOG_DEBUG, "conga_process_post_auth(): "
+             "Received RESPONSE \'%d %s\' from %s for REQUEST: %s, "
+             "message-body: %s.", 
+             msg_hdr.http_hdr().status_code(), 
+             status_code_phrase(msg_hdr.http_hdr().status_code()),
+             tmp_session.TCPConn::print().c_str(), 
+             auth_http_hdr.print_start_line().c_str(),
+             auth_msg_body.c_str());
+
+  // Parse JSON message-body.
+  rapidjson::Document response;
+  if (response.Parse(auth_msg_body.c_str()).HasParseError()) {
+    error.Init(EX_DATAERR, "conga_process_post_auth(): "
+               "Failed to parse JSON from %s: %s",
+               tmp_session.hostname().c_str(), auth_msg_body.c_str());
+    return "";
+  }
+
+  if (!response.HasMember(kDetailIsActive) ||
+      !response[kDetailIsActive].IsBool()) {
     error.Init(EX_DATAERR, "conga_process_post_auth(): %s is invalid: %s", 
                kDetailIsActive, tmp_session.rbuf());
     return "";
   }
 
   if (!response[kDetailIsActive].GetBool()) {
-    error.Init(EX_DATAERR, "conga_process_post_auth(): "
-               "Authorization failure with request %s", auth_db_url.print().c_str());
+    error.Init(EX_DATAERR, "Authorization failure using request %s",
+               auth_db_url.print().c_str());
     return "";
   }
 
@@ -628,7 +723,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
   string ret_msg(kHTTPMsgBodyMaxSize, '\0');
   int status = 0;
   string state = "running";  // TODO(aka) Does this even make sense in an auth request?
-  int duration = 900;  // TODO(aka) 15 mins (make a const or parameter?)
+  int duration = info.duration_;
   time_t start_time = time(NULL);
   time_t end_time = start_time + (time_t)duration;
 
@@ -636,98 +731,179 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
   // request, or the user has an existing api-key.
 
   if (details.HasMember(kDetailAPIKey) && details[kDetailAPIKey].IsString()) {
-    // Reaquire the iterator from flows for our key, as another
-    // thread may have mucked with flows since our earlier check.
+    // Reaquire the iterator from api_keys for our key, as another
+    // thread may have mucked with api_keys since our earlier check.
 
 #if DEBUG_MUTEX_LOCK
-    warnx("conga_process_post_auth: requesting request list lock.");
+    warnx("conga_process_post_auth: requesting api keys lock.");
 #endif
-    pthread_mutex_lock(flow_list_mtx);
-    list<FlowInfo>::iterator flow_itr = flows->begin();
-    while (flow_itr != flows->end()) {
-      string key = flow_itr->api_key_;
+    pthread_mutex_lock(api_keys_mtx);
+    list<AuthInfo>::iterator api_key_itr = api_keys->begin();
+    while (api_key_itr != api_keys->end()) {
+      string key = api_key_itr->api_key_;
+      // API key is *not* case-sensitive!
       std::transform(key.begin(), key.end(), key.begin(), ::tolower);
       if (!key.compare(details[kDetailAPIKey].GetString()))
         break;
 
-      flow_itr++;
+      api_key_itr++;
     }
 
-    if (flow_itr == flows->end()) {
+    if (api_key_itr == api_keys->end()) {
       // This should never happen, but hey, who knows in MT land.
       error.Init(EX_DATAERR, "conga_process_post_auth(): "
                  "API Key: %s, is now missing", details[kDetailAPIKey].GetString());
 #if DEBUG_MUTEX_LOCK
-      warnx("conga_process_post_auth: releasing request list lock.");
+      warnx("conga_process_post_auth: releasing api keys lock.");
 #endif
-      pthread_mutex_unlock(flow_list_mtx);
+      pthread_mutex_unlock(api_keys_mtx);
       return "";
     }
 
     // Update our expiration (note, we leave start_time_ unchanged).
-    flow_itr->end_time_ = end_time;
+    api_key_itr->end_time_ = end_time;
 
     snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ { "
              "\"%s\":\"%s\", "
              "\"%s\": %d, \"%s\": %d, "
              "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
              "} ] }", 
-             status, kDetailAPIKey, flow_itr->api_key_.c_str(), 
-             kDetailStartTime, flow_itr->start_time_, 
-             kDetailEndTime, flow_itr->end_time_,
-             kDetailUserID, flow_itr->user_id_.c_str(),
-             kDetailProjectID, flow_itr->project_id_.c_str(),
-             kDetailResourceID, flow_itr->resource_id_.c_str());
+             status, kDetailAPIKey, api_key_itr->api_key_.c_str(), 
+             kDetailStartTime, api_key_itr->start_time_, 
+             kDetailEndTime, api_key_itr->end_time_,
+             kDetailUserID, api_key_itr->user_id_.c_str(),
+             kDetailProjectID, api_key_itr->project_id_.c_str(),
+             kDetailResourceID, api_key_itr->resource_id_.c_str());
 
 #if DEBUG_MUTEX_LOCK
-    warnx("conga_process_post_auth: releasing request list lock.");
+    warnx("conga_process_post_auth: releasing api keys lock.");
 #endif
-    pthread_mutex_unlock(flow_list_mtx);
+    pthread_mutex_unlock(api_keys_mtx);
 
     logger.Log(LOG_NOTICE, "Processed POST auth (%s:%s, %s:%s, %s:%s) from %s.",
-               kDetailUserID, flow_itr->user_id_.c_str(),
-               kDetailProjectID, flow_itr->project_id_.c_str(),
-               kDetailResourceID, flow_itr->resource_id_.c_str(),
+               kDetailUserID, api_key_itr->user_id_.c_str(),
+               kDetailProjectID, api_key_itr->project_id_.c_str(),
+               kDetailResourceID, api_key_itr->resource_id_.c_str(),
                peer->hostname().c_str());
   } else {
-    FlowInfo new_request;
-    new_request.api_key_ = gen_random_string(kAPIKeySize);
-    new_request.user_id_ = details[kDetailUserID].GetString();
-    new_request.project_id_ = details[kDetailProjectID].GetString();
-    new_request.resource_id_ = details[kDetailResourceID].GetString();
-    //new_request.msg_hdr_id_ = msg_id_hash;  // XXX Do we need this?
+    AuthInfo new_key;
+    new_key.api_key_ = gen_random_string(kAPIKeySize);
+    new_key.user_id_ = details[kDetailUserID].GetString();
+    new_key.project_id_ = details[kDetailProjectID].GetString();
+    new_key.resource_id_ = details[kDetailResourceID].GetString();
+    //new_key.msg_hdr_id_ = msg_id_hash;  // XXX Do we need this?
 
-    new_request.start_time_ = start_time;
-    new_request.end_time_ = end_time;
+    new_key.start_time_ = start_time;
+    new_key.end_time_ = end_time;
 
     snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ { "
              "\"%s\":\"%s\", "
              "\"%s\": %d, \"%s\": %d, "
              "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
              "} ] }", 
-             status, kDetailAPIKey, new_request.api_key_.c_str(), 
-             kDetailStartTime, new_request.start_time_, 
-             kDetailEndTime, new_request.end_time_,
-             kDetailUserID, new_request.user_id_.c_str(),
-             kDetailProjectID, new_request.project_id_.c_str(),
-             kDetailResourceID, new_request.resource_id_.c_str());
+             status, kDetailAPIKey, new_key.api_key_.c_str(), 
+             kDetailStartTime, new_key.start_time_, 
+             kDetailEndTime, new_key.end_time_,
+             kDetailUserID, new_key.user_id_.c_str(),
+             kDetailProjectID, new_key.project_id_.c_str(),
+             kDetailResourceID, new_key.resource_id_.c_str());
 
 #if DEBUG_MUTEX_LOCK
-    warnx("conga_process_post_auth: requesting request list lock.");
+    warnx("conga_process_post_auth: requesting api keys lock.");
 #endif
-    pthread_mutex_lock(flow_list_mtx);
-    flows->push_back(new_request);
+    pthread_mutex_lock(api_keys_mtx);
+    api_keys->push_back(new_key);
 #if DEBUG_MUTEX_LOCK
-    warnx("conga_process_post_auth: releasing request list lock.");
+    warnx("conga_process_post_auth: releasing api keys lock.");
 #endif
-    pthread_mutex_unlock(flow_list_mtx);
+    pthread_mutex_unlock(api_keys_mtx);
 
     logger.Log(LOG_NOTICE, "Processed POST auth (%s:%s, %s:%s, %s:%s) from %s.",
-               kDetailUserID, new_request.user_id_.c_str(),
-               kDetailProjectID, new_request.project_id_.c_str(),
-               kDetailResourceID, new_request.resource_id_.c_str(),
+               kDetailUserID, new_key.user_id_.c_str(),
+               kDetailProjectID, new_key.project_id_.c_str(),
+               kDetailResourceID, new_key.resource_id_.c_str(),
                peer->hostname().c_str());
   }
+
+  // Head back to conga_process_incoming_msg() to send RESPONSE out.
+  return ret_msg;
+}
+
+// Routine to delete an API key.
+string conga_process_delete_auth(const ConfInfo& info,
+                                 const HTTPFraming& http_hdr,
+                                 const string& msg_body, const File& msg_data,
+                                 list<AuthInfo>* api_keys, 
+                                 pthread_mutex_t* api_keys_mtx,
+                                 list<SSLSession>::iterator peer) {
+  URL url = http_hdr.uri();
+
+  // Grab the API Key from the path (should be the last value).
+  size_t last_slash = url.path().find_last_of("/");
+  string api_key = url.path().substr(last_slash + 1);
+  if (api_key.size() <= 0) {
+    // No key, no work.
+    error.Init(EX_DATAERR, "conga_process_delete_auth(): "
+               "API Key not included in URL query: %s", url.print().c_str());
+    return "";
+  }
+
+  // Search api_keys, locking it.
+#if DEBUG_MUTEX_LOCK
+  warnx("conga_process_delete_auth: requesting api keys lock.");
+#endif
+  pthread_mutex_lock(api_keys_mtx);
+  list<AuthInfo>::iterator api_key_itr = api_keys->begin();
+  while (api_key_itr != api_keys->end()) {
+    string key = api_key_itr->api_key_;
+    // API key is *not* case-sensitive!
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    if (!key.compare(api_key))
+      break;
+
+    api_key_itr++;
+  }
+
+  if (api_key_itr == api_keys->end()) {
+    // We have no record of this key (anymore?).
+    error.Init(EX_DATAERR, "conga_process_delete_auth(): "
+               "API Key: %s, not found", api_key.c_str());
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_delete_auth: releasing api keys lock.");
+#endif
+    pthread_mutex_unlock(api_keys_mtx);
+    return "";
+  }
+
+  logger.Log(LOG_DEBUG, "conga_process_delete_auth(): "
+             "working on key: %s, user: %s, project: %s, resource: %s.",
+             api_key_itr->api_key_.c_str(),
+             api_key_itr->user_id_.c_str(), api_key_itr->project_id_.c_str(),
+             api_key_itr->resource_id_.c_str());
+
+  AuthInfo tmp_auth(*api_key_itr);  // save a copy before blowing it away
+  api_keys->erase(api_key_itr);
+
+#if DEBUG_MUTEX_LOCK
+  warnx("conga_process_delete_auth: releasing api keys lock.");
+#endif
+  pthread_mutex_unlock(api_keys_mtx);
+
+  string ret_msg(kHTTPMsgBodyMaxSize, '\0');
+  int status = 0;
+
+  // Build the response.
+  snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1,
+           "{ \"status\":%d, \"results\": [ { "
+           "\"%s\":\"%s\", "
+           "} ] }", 
+           status, kDetailAPIKey, api_key.c_str());
+
+  logger.Log(LOG_NOTICE, "Processed DELETE auth (%s:%s, %s:%s, %s:%s) from %s.",
+             kDetailAPIKey, tmp_auth.api_key_.c_str(),
+             kDetailUserID, tmp_auth.user_id_.c_str(),
+             kDetailProjectID, tmp_auth.project_id_.c_str(),
+             peer->hostname().c_str());
 
   // Head back to conga_process_incoming_msg() to send RESPONSE out.
   return ret_msg;
@@ -736,15 +912,16 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
 // Routine to ge the status of a user's token (api-key).
 string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                               const string& msg_body, const File& msg_data,
-                              list<SSLSession>::iterator peer, 
-                              list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx) {
+                              list<AuthInfo>* api_keys, 
+                              pthread_mutex_t* api_keys_mtx,
+                              list<SSLSession>::iterator peer) {
   URL url = http_hdr.uri();
 
   // Grab the API Key from the path (should be the last value).
   size_t last_slash = url.path().find_last_of("/");
   string api_key = url.path().substr(last_slash + 1);
   if (api_key.size() <= 0) {
-    // They requested a renewal, but we have no record of this key!
+    // No key, no work.
     error.Init(EX_DATAERR, "conga_process_get_auth(): "
                "API Key not included in URL query: %s", url.print().c_str());
     return "";
@@ -755,6 +932,7 @@ string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
   list<struct url_query_info>::iterator key_itr = queries.begin();
   while (key_itr != queries.end()) {
     string key = key_itr->key;
+    // API key is *not* case-sensitive!
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
     if (!key.compare(kDetailAPIKey)) {
       request_info->api_key_ = key_itr->value;
@@ -774,75 +952,100 @@ string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
   }
 #endif
 
-  // Find the Flow information for this key (note, as we're just
-  // reading, no locking necessary) ...
-
-  list<FlowInfo>::iterator flow_itr = flows->begin();
-  while (flow_itr != flows->end()) {
-    string key = flow_itr->api_key_;
+  // Search api_keys, locking it.
+#if DEBUG_MUTEX_LOCK
+  warnx("conga_process_get_auth: requesting api keys lock.");
+#endif
+  pthread_mutex_lock(api_keys_mtx);
+  list<AuthInfo>::iterator api_key_itr = api_keys->begin();
+  while (api_key_itr != api_keys->end()) {
+    string key = api_key_itr->api_key_;
+    // API key is *not* case-sensitive!
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
     if (!key.compare(api_key))
       break;
 
-    flow_itr++;
+    api_key_itr++;
   }
 
-  if (flow_itr == flows->end()) {
-    // They requested a renewal, but we have no record of this key!
+  if (api_key_itr == api_keys->end()) {
+    // We have no record of this key (anymore?).
     error.Init(EX_DATAERR, "conga_process_get_auth(): "
-               "API Key: %s, not found in state table", api_key.c_str());
+               "API Key: %s, not found", api_key.c_str());
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_get_auth: releasing api keys lock.");
+#endif
+    pthread_mutex_unlock(api_keys_mtx);
     return "";
   }
 
   logger.Log(LOG_DEBUG, "conga_process_get_auth(): "
              "working on user: %s, project: %s, resource: %s.",
-             flow_itr->user_id_.c_str(), flow_itr->project_id_.c_str(), flow_itr->resource_id_.c_str());
+             api_key_itr->user_id_.c_str(), api_key_itr->project_id_.c_str(),
+             api_key_itr->resource_id_.c_str());
 
   string ret_msg(kHTTPMsgBodyMaxSize, '\0');
   int status = 0;
   string state = "running";
 
   // Build the response.
-  snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ { "
+  snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1,
+           "{ \"status\":%d, \"results\": [ { "
            "\"%s\":\"%s\", "
            "\"%s\": %d, \"%s\": %d, "
            "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
            "} ] }", 
-           status, kDetailAPIKey, flow_itr->api_key_.c_str(), 
-           kDetailStartTime, flow_itr->start_time_, 
-           kDetailEndTime, flow_itr->end_time_,
-           kDetailUserID, flow_itr->user_id_.c_str(),
-           kDetailProjectID, flow_itr->project_id_.c_str(),
-           kDetailResourceID, flow_itr->resource_id_.c_str());
+           status, kDetailAPIKey, api_key_itr->api_key_.c_str(), 
+           kDetailStartTime, api_key_itr->start_time_, 
+           kDetailEndTime, api_key_itr->end_time_,
+           kDetailUserID, api_key_itr->user_id_.c_str(),
+           kDetailProjectID, api_key_itr->project_id_.c_str(),
+           kDetailResourceID, api_key_itr->resource_id_.c_str());
+
+
+#if DEBUG_MUTEX_LOCK
+  warnx("conga_process_get_auth: releasing api keys lock.");
+#endif
+  pthread_mutex_unlock(api_keys_mtx);
 
   logger.Log(LOG_NOTICE, "Processed GET auth (%s:%s, %s:%s, %s:%s) from %s.",
-             kDetailAPIKey, flow_itr->api_key_.c_str(),
-             kDetailUserID, flow_itr->user_id_.c_str(),
-             kDetailProjectID, flow_itr->project_id_.c_str(),
+             kDetailAPIKey, api_key_itr->api_key_.c_str(),
+             kDetailUserID, api_key_itr->user_id_.c_str(),
+             kDetailProjectID, api_key_itr->project_id_.c_str(),
              peer->hostname().c_str());
 
   // Head back to conga_process_incoming_msg() to send RESPONSE out.
   return ret_msg;
 }
 
-string conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& http_hdr,
-                                      const string& msg_body, const File& msg_data,
-                                      list<SSLSession>::iterator peer, 
-                                      list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx) {
+// Routine to handle POST allocation requests.  If the user includes
+// an allocation_id within the RESTful request, then it's treated as a
+// renewal.
+string conga_process_post_allocations(const ConfInfo& info,
+                                      const HTTPFraming& http_hdr,
+                                      const string& msg_body,
+                                      const File& msg_data,
+                                      list<AuthInfo>* api_keys, 
+                                      pthread_mutex_t* api_keys_mtx,
+                                      list<FlowInfo>* flows,
+                                      pthread_mutex_t* flow_list_mtx,
+                                      list<SSLSession>::iterator peer) {
   URL url = http_hdr.uri();
 
-  // Get the allocation_id if the user specified one in the RESTful request.
+  // First, see if the allocation_id is specified.
 
 #if 0  // Deprecated code: allocation_id use to be in the query as opposed to the path.
   list<struct url_query_info> queries = url.query();
   list<struct url_query_info>::iterator itr = queries.begin();
   while (itr != queries.end()) {
     string key = itr->key;
+    // Allocation ID is *not* case-sensitive!
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
     if (!key.compare(kDetailAllocationID)) {
       request_info->allocation_id_ = itr->value;
     } else {
-      logger.Log(LOG_WARN, "conga_process_post_allocations(): Received unknown query: %s=%s.",
+      logger.Log(LOG_WARN, "conga_process_post_allocations(): "
+                 "Received unknown query: %s=%s.",
                  key.c_str(), itr->value.c_str());
     }
 
@@ -861,116 +1064,311 @@ string conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& h
     return "";
   }
 
+  // Make sure our API key is valid.
+  if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString()) {
+    error.Init(EX_DATAERR, "conga_process_post_allocations(): "
+               "%s, %s, %s, %s or %s is invalid: %s", 
+               kDetailAPIKey, kDetailProjectID, 
+               kDetailSrcIP, kDetailDstIP, kDetailDuration, msg_body.c_str());
+    return "";
+  } 
+
+#if DEBUG_MUTEX_LOCK
+  warnx("conga_process_post_allocations: requesting api keys lock.");
+#endif
+  pthread_mutex_lock(api_keys_mtx);
+  list<AuthInfo>::iterator api_key_itr = api_keys->begin();
+  while (api_key_itr != api_keys->end()) {
+    string key = api_key_itr->api_key_;
+    // API key is *not* case-sensitive!
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    if (!key.compare(details[kDetailAPIKey].GetString()))
+      break;
+
+    api_key_itr++;
+  }
+
+  if (api_key_itr == api_keys->end()) {
+    // We have no record of this key (anymore?).
+    error.Init(EX_DATAERR, "conga_process_post_allocations(): "
+               "API Key: %s, not found", details[kDetailAPIKey].GetString());
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_post_allocations: releasing api keys lock.");
+#endif
+    pthread_mutex_unlock(api_keys_mtx);
+    return "";
+  }
+
+  AuthInfo our_auth(*api_key_itr);  // save a copy so we can release our lock
+
+#if DEBUG_MUTEX_LOCK
+  warnx("conga_process_post_allocations: releasing api keys lock.");
+#endif
+  pthread_mutex_unlock(api_keys_mtx);
+
+  logger.Log(LOG_DEBUG, "conga_process_post_allocations(): "
+             "working on user: %s, project: %s, resource: %s "
+             "and possible allocation id: %s.",
+             our_auth.user_id_.c_str(), our_auth.project_id_.c_str(),
+             our_auth.resource_id_.c_str(), allocation_id.c_str());
+
   string ret_msg(kHTTPMsgBodyMaxSize, '\0');
 
   // Now, see if this is a create or renewal request ...
-  if (allocation_id.size() > 0) {
+  if (allocation_id.size() <= 0) {
     // User requested a renewal.
     error.Init(EX_DATAERR, "conga_process_post_allocations(): "
-               "POST allocation renewal (%s) not supported yet", allocation_id.c_str());
+               "POST allocation renewal (%s) not supported yet",
+               allocation_id.c_str());
     return "";
   } else {
     // This is an instantiation request.
-    if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString() ||
-        !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString() ||
-        !details.HasMember(kDetailSrcIP) || !details[kDetailSrcIP].IsString() ||
+    if (!details.HasMember(kDetailSrcIP) || !details[kDetailSrcIP].IsString() ||
         !details.HasMember(kDetailDstIP) || !details[kDetailDstIP].IsString() ||
-        !details.HasMember(kDetailDuration) || !details[kDetailDuration].IsInt()) {
+        !details.HasMember(kDetailDuration) ||
+        !details[kDetailDuration].IsInt()) {
       error.Init(EX_DATAERR, "conga_process_post_allocations(): "
-                 "%s, %s, %s, %s or %s is invalid: %s", 
-                 kDetailAPIKey, kDetailProjectID, kDetailSrcIP, kDetailDstIP, kDetailDuration,
+                 "%s, %s, %s or %s is invalid: %s", 
+                 kDetailProjectID, kDetailSrcIP, kDetailDstIP, kDetailDuration,
                  msg_body.c_str());
       return "";
     }
 
-    // Find the flow information that associated with the api-key.
-    // XXX TODO(aka) This is mucked up, as there can be multiple API keys ... Sounds like API keys need to be their own record!
-    logger.Log(LOG_EMERG, "conga_process_post_allocations(): XXX TODO(aka) Add code to submit request!");
+    // Generate a unique allocation id.
+    char tmp_buf[64];  // assuming no more than 64 digits (64 bits ~= 20 digits)
+    snprintf(tmp_buf, 64, "%ul", ++allocation_id_cnt);
+    allocation_id = tmp_buf;
+  }
 
+  // See if our flow resources are available ...
+  logger.Log(LOG_EMERG, "conga_process_post_allocations(): XXX TODO(aka) Add code to submit request!");
+
+  // Build our new flow.
+  FlowInfo new_flow;
+  new_flow.allocation_id_ = allocation_id;
+  new_flow.api_key_ = details[kDetailAPIKey].GetString();
+  new_flow.src_ip_ = details[kDetailSrcIP].GetString();
+  new_flow.dst_ip_ = details[kDetailDstIP].GetString();
+  new_flow.duration_ = details[kDetailDuration].GetInt();
+
+  // See what else we have ...
+  if (details.HasMember(kDetailSrcPort) && details[kDetailSrcPort].IsInt())
+    new_flow.src_port_ = details[kDetailSrcPort].GetInt();
+  if (details.HasMember(kDetailDstPort) && details[kDetailDstPort].IsInt())
+    new_flow.dst_port_ = details[kDetailDstPort].GetInt();
+
+  // Make sure the flow doesn't already exist.
 #if DEBUG_MUTEX_LOCK
-    warnx("conga_process_post_allocations: requesting request list lock.");
+  warnx("conga_process_post_allocations: requesting flow list lock.");
 #endif
-    pthread_mutex_lock(flow_list_mtx);
-    list<FlowInfo>::iterator flow_itr = flows->begin();
-    while (flow_itr != flows->end()) {
-      string key = flow_itr->api_key_;
-      std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-      if (!key.compare(details[kDetailAPIKey].GetString()))
-        break;
-
-      flow_itr++;
-    }
-
-    if (flow_itr == flows->end()) {
+  pthread_mutex_lock(flow_list_mtx);
+  list<FlowInfo>::iterator flow_itr = flows->begin();
+  while (flow_itr != flows->end()) {
+    string key = flow_itr->allocation_id_;
+    // Allocation ID is *not* case-sensitive!  (Is it even alpha-numeric?)
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    if (!key.compare(new_flow.allocation_id_)) {
       error.Init(EX_DATAERR, "conga_process_post_allocations(): "
-                 "API Key: %s, not found in state table", details[kDetailAPIKey].GetString());
+                 "Allocation ID: %s already exists in flow table", 
+                 new_flow.allocation_id_.c_str());
 #if DEBUG_MUTEX_LOCK
-      warnx("conga_process_post_allocations: releasing request list lock.");
+      warnx("conga_process_post_allocations: releasing flow list lock.");
 #endif
       pthread_mutex_unlock(flow_list_mtx);
       return "";
     }
 
-    flow_itr->src_ip_ = details[kDetailSrcIP].GetString();
-    flow_itr->dst_ip_ = details[kDetailDstIP].GetString();
-    flow_itr->duration_ = details[kDetailDuration].GetInt();
+    flow_itr++;
+  }
 
-    // See what else we have ...
-#if 0  // TODO(aka) Wouldn't user_id be setup during auth?
-    if (details.HasMember(kDetailUserID)) {
-      if (details[kDetailUserID].IsString())
-        flow_itr->user_id_ = details[kDetailUserID].GetString();
-    }
-#endif
-
-    if (details.HasMember(kDetailSrcPort)) {
-      if (details[kDetailSrcPort].IsInt())
-        flow_itr->src_port_ = details[kDetailSrcPort].GetInt();
-    }
-
-    if (details.HasMember(kDetailDstPort)) {
-      if (details[kDetailDstPort].IsInt())
-        flow_itr->dst_port_ = details[kDetailDstPort].GetInt();
-    }
-
-    // Submit the request and figure out its status ...
-    logger.Log(LOG_EMERG, "conga_process_post_allocations(): XXX TODO(aka) Add code to submit request!");
-
-    flow_itr->allocation_id_ = "1234";
-    string state = "queued";
-    int status = 0;
-
-    // Build the response.
-    snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ { "
-             "\"%s\":\"%s\", \"%s\":\"%s\" } ] }",
-             status,
-             kDetailAllocationID, flow_itr->allocation_id_.c_str(), 
-             kDetailState, state.c_str());
-
-    logger.Log(LOG_NOTICE, "Processed POST allocations "
-               "(%s:%s, %s:%s, %s:%s, %s:%s, %s:%d) from %s.",
-               kDetailAPIKey, flow_itr->api_key_.c_str(),
-               kDetailProjectID, flow_itr->project_id_.c_str(),
-               kDetailSrcIP, flow_itr->src_ip_.c_str(),
-               kDetailDstIP, flow_itr->dst_ip_.c_str(),
-               kDetailDuration, flow_itr->duration_,
-               peer->hostname().c_str());
+  // If we made it here, we did not find a matching flow, so add our new one.
+  flows->push_back(new_flow);
 
 #if DEBUG_MUTEX_LOCK
-    warnx("conga_process_post_allocations: releasing request list lock.");
+  warnx("conga_process_post_allocations: releasing flow list lock.");
 #endif
-    pthread_mutex_unlock(flow_list_mtx);
-  }
+  pthread_mutex_unlock(flow_list_mtx);
+
+  string state = "queued";
+  int status = 0;
+
+  // Build the response.
+  snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, 
+           "{ \"status\":%d, \"results\": [ { "
+           "\"%s\":\"%s\", \"%s\":\"%s\" } ] }",
+           status,
+           kDetailAllocationID, new_flow.allocation_id_.c_str(), 
+           kDetailState, state.c_str());
+
+  logger.Log(LOG_NOTICE, "Processed POST allocations "
+             "(%s:%s, %s:%s, %s:%s, %s:%s, %s:%d) from %s.",
+             kDetailAllocationID, new_flow.allocation_id_.c_str(),
+             kDetailAPIKey, new_flow.api_key_.c_str(),
+             kDetailSrcIP, new_flow.src_ip_.c_str(),
+             kDetailDstIP, new_flow.dst_ip_.c_str(),
+             kDetailDuration, new_flow.duration_,
+             peer->hostname().c_str());
 
   // Head back to conga_process_incoming_msg() to send RESPONSE out.
   return ret_msg;
 }
 
-// Process the kServiceRequestToken service & "message-body" in our message.
-string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& http_hdr,
-                                     const string& msg_body, const File& msg_data,
-                                     list<SSLSession>::iterator peer, 
-                                     list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx) {
+// Routine to delete a flow.
+string conga_process_delete_allocations(const ConfInfo& info, 
+                                        const HTTPFraming& http_hdr,
+                                        const string& msg_body,
+                                        const File& msg_data,
+                                        list<AuthInfo>* api_keys, 
+                                        pthread_mutex_t* api_keys_mtx,
+                                        list<FlowInfo>* flows,
+                                        pthread_mutex_t* flow_list_mtx,
+                                        list<SSLSession>::iterator peer) {
+  URL url = http_hdr.uri();
+
+  // Get the allocation_id the user specified in the RESTful request.
+  size_t last_slash = url.path().find_last_of("/");
+  string allocation_id = url.path().substr(last_slash + 1);
+  if (allocation_id.size() == 0) {
+    error.Init(EX_DATAERR, "conga_process_delete_allocations(): "
+               "No Allocation-ID found");
+    return "";
+  }
+
+  // Parse JSON message-body.
+  rapidjson::Document details;
+  if (details.Parse(msg_body.c_str()).HasParseError()) {
+    error.Init(EX_DATAERR, "conga_process_delete_allocations(): "
+               "Failed to parse JSON: %s", msg_body.c_str());
+    return "";
+  }
+
+  // Make sure our API key is valid.
+  if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString()) {
+    error.Init(EX_DATAERR, "conga_process_delete_allocations(): "
+               "%s, %s, %s, %s or %s is invalid: %s", 
+               kDetailAPIKey, kDetailProjectID, 
+               kDetailSrcIP, kDetailDstIP, kDetailDuration, msg_body.c_str());
+    return "";
+  } 
+
+#if DEBUG_MUTEX_LOCK
+  warnx("conga_process_delete_allocations: requesting api keys lock.");
+#endif
+  pthread_mutex_lock(api_keys_mtx);
+  list<AuthInfo>::iterator api_key_itr = api_keys->begin();
+  while (api_key_itr != api_keys->end()) {
+    string key = api_key_itr->api_key_;
+    // API key is *not* case-sensitive!
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    if (!key.compare(details[kDetailAPIKey].GetString()))
+      break;
+
+    api_key_itr++;
+  }
+
+  if (api_key_itr == api_keys->end()) {
+    // We have no record of this key (anymore?).
+    error.Init(EX_DATAERR, "conga_process_delete_allocations(): "
+               "API Key: %s, not found", details[kDetailAPIKey].GetString());
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_delete_allocations: releasing api keys lock.");
+#endif
+    pthread_mutex_unlock(api_keys_mtx);
+    return "";
+  }
+
+  AuthInfo our_auth(*api_key_itr);  // save a copy so we can release our lock
+
+#if DEBUG_MUTEX_LOCK
+  warnx("conga_process_delete_allocations: releasing api keys lock.");
+#endif
+  pthread_mutex_unlock(api_keys_mtx);
+
+  logger.Log(LOG_DEBUG, "conga_process_delete_allocations(): "
+             "working on user: %s, project: %s, resource: %s "
+             "and possible allocation id: %s.",
+             our_auth.user_id_.c_str(), our_auth.project_id_.c_str(),
+             our_auth.resource_id_.c_str(), allocation_id.c_str());
+
+  // Find the flow that matches our allocation_id ...
+#if DEBUG_MUTEX_LOCK
+  warnx("conga_process_delete_allocations: requesting flow list lock.");
+#endif
+  pthread_mutex_lock(flow_list_mtx);
+  list<FlowInfo>::iterator flow_itr = flows->begin();
+  while (flow_itr != flows->end()) {
+    string key = flow_itr->allocation_id_;
+    // Allocation ID is *not* case-sensitive!  (Is it even alpha-numeric?)
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    if (!key.compare(allocation_id))
+      break;
+
+    flow_itr++;
+  }
+
+  string ret_msg(kHTTPMsgBodyMaxSize, '\0');
+  int status = 0;
+
+  // Act depending on whether or not we found a flow matching our id ...
+  if (flow_itr == flows->end()) {
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_delete_allocations: releasing flow list lock.");
+#endif
+    pthread_mutex_unlock(flow_list_mtx);
+
+    // Note, this is not necessarily an ERROR, so respond normally,
+    // but with the error field filled.
+
+    string err_msg = "Allocation ID not found in Flow table";
+
+    // Build response.
+    snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1,
+             "{ \"status\":%d, \"results\": [ { "
+             "\"%s\":\"%s\", "
+             "} ] \"errors\":\"%s\" }", 
+             status,
+             kDetailAllocationID, allocation_id.c_str(),
+             err_msg.c_str());
+  } else {
+    // Found our flow, so remove it from our list.
+    FlowInfo our_flow(*flow_itr);  // save a copy before blowing it away
+    flows->erase(flow_itr);
+
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_delete_allocations: releasing flow list lock.");
+#endif
+    pthread_mutex_unlock(flow_list_mtx);
+
+    // Build response.
+    snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1,
+             "{ \"status\":%d, \"results\": [ { "
+             "\"%s\":\"%s\", "
+             "} ] \"errors\": [ ] }", 
+             status,
+             kDetailAllocationID, our_flow.allocation_id_.c_str());
+  }
+
+  logger.Log(LOG_NOTICE, "Processed DELETE allocations (%s:%s, %s:%s) from %s.",
+             kDetailAllocationID, allocation_id.c_str(),
+             kDetailAPIKey, our_auth.api_key_.c_str(),
+             peer->hostname().c_str());
+
+  // Head back to conga_process_incoming_msg() to send RESPONSE out.
+  return ret_msg;
+}
+
+// Routine to either return information about a specific flow, or to
+// return the allocation ids for all flows associated with an API key
+// (user/grant/resource).
+string conga_process_get_allocations(const ConfInfo& info,
+                                     const HTTPFraming& http_hdr,
+                                     const string& msg_body,
+                                     const File& msg_data,
+                                     list<AuthInfo>* api_keys, 
+                                     pthread_mutex_t* api_keys_mtx,
+                                     list<FlowInfo>* flows,
+                                     pthread_mutex_t* flow_list_mtx,
+                                     list<SSLSession>::iterator peer) {
   URL url = http_hdr.uri();
 
   // Get the allocation_id if the user specified one in the RESTful request.
@@ -980,6 +1378,7 @@ string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& ht
   list<struct url_query_info>::iterator itr = queries.begin();
   while (itr != queries.end()) {
     string key = itr->key;
+    // API key is *not* case-sensitive!
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
     if (!key.compare(kDetailAllocationID)) {
       request_info->allocation_id_ = itr->value;
@@ -1003,27 +1402,69 @@ string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& ht
     return "";
   }
 
+  // Make sure our API key is valid.
   if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString()) {
-    error.Init(EX_DATAERR, "conga_process_get_allocations(): %s is invalid: %s",
-               kDetailAPIKey, msg_body.c_str());
+    error.Init(EX_DATAERR, "conga_process_get_allocations(): "
+               "%s, %s, %s, %s or %s is invalid: %s", 
+               kDetailAPIKey, kDetailProjectID, 
+               kDetailSrcIP, kDetailDstIP, kDetailDuration, msg_body.c_str());
+    return "";
+  } 
+
+#if DEBUG_MUTEX_LOCK
+  warnx("conga_process_get_allocations: requesting api keys lock.");
+#endif
+  pthread_mutex_lock(api_keys_mtx);
+  list<AuthInfo>::iterator api_key_itr = api_keys->begin();
+  while (api_key_itr != api_keys->end()) {
+    string key = api_key_itr->api_key_;
+    // API key is *not* case-sensitive!
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    if (!key.compare(details[kDetailAPIKey].GetString()))
+      break;
+
+    api_key_itr++;
+  }
+
+  if (api_key_itr == api_keys->end()) {
+    // We have no record of this key (anymore?).
+    error.Init(EX_DATAERR, "conga_process_get_allocations(): "
+               "API Key: %s, not found", details[kDetailAPIKey].GetString());
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_get_allocations: releasing api keys lock.");
+#endif
+    pthread_mutex_unlock(api_keys_mtx);
     return "";
   }
 
+  AuthInfo our_auth(*api_key_itr);  // save a copy so we can release our lock
+
+#if DEBUG_MUTEX_LOCK
+  warnx("conga_process_get_allocations: releasing api keys lock.");
+#endif
+  pthread_mutex_unlock(api_keys_mtx);
+
+  logger.Log(LOG_DEBUG, "conga_process_get_allocations(): "
+             "working on user: %s, project: %s, resource: %s "
+             "and possible allocation id: %s.",
+             our_auth.user_id_.c_str(), our_auth.project_id_.c_str(),
+             our_auth.resource_id_.c_str(), allocation_id.c_str());
+
   string ret_msg(kHTTPMsgBodyMaxSize, '\0');
 
-  // See if request is for all allocations for the user's project, or just a specific one ...
+  // See if we want one or all ...
   if (allocation_id.size() > 0) {
     // Find the flow that matches our allocation_id ...
 #if DEBUG_MUTEX_LOCK
-    warnx("conga_process_get_allocations: requesting request list lock.");
+    warnx("conga_process_get_allocations: requesting flow list lock.");
 #endif
     pthread_mutex_lock(flow_list_mtx);
     list<FlowInfo>::iterator flow_itr = flows->begin();
     while (flow_itr != flows->end()) {
-      string flow_allocation_id = flow_itr->allocation_id_;
-      std::transform(flow_allocation_id.begin(), flow_allocation_id.end(),
-                     flow_allocation_id.begin(), ::tolower);
-      if (!flow_allocation_id.compare(allocation_id))
+      string key = flow_itr->allocation_id_;
+      // Allocation ID is *not* case-sensitive!  (Is it even alpha-numeric?)
+      std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+      if (!key.compare(allocation_id))
         break;
 
       flow_itr++;
@@ -1031,23 +1472,31 @@ string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& ht
 
     if (flow_itr == flows->end()) {
       error.Init(EX_DATAERR, "conga_process_get_allocations(): "
-                 "Allocation ID: %s, not found in state table", allocation_id.c_str());
+                 "Allocation ID: %s, not found in flow table",
+                 allocation_id.c_str());
 #if DEBUG_MUTEX_LOCK
-      warnx("conga_process_get_allocations: releasing request list lock.");
+      warnx("conga_process_get_allocations: releasing flow list lock.");
 #endif
       pthread_mutex_unlock(flow_list_mtx);
       return "";
     }
 
-    logger.Log(LOG_EMERG, "conga_process_get_allocations(): TODO(aka) Add code to get status!");
-    string state = "running";
+    FlowInfo our_flow(*flow_itr);  // save a copy, so we can release the lock
 
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_get_allocations: releasing flow list lock.");
+#endif
+    pthread_mutex_unlock(flow_list_mtx);
+
+    logger.Log(LOG_EMERG, "conga_process_get_allocations(): XXX TODO(aka) Add code to get status!");
+
+    string state = "running";
     int status = 0;
     
     // Build response.
-    snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ { "
+    snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1,
+             "{ \"status\":%d, \"results\": [ { "
              "\"%s\":\"%s\", "
-             "\"%s\": %d, \"%s\": %d, "
              "\"%s\":\"%s\", "
              "\"%s\":%d, "
              "\"%s\":\"%s\", \"%s\":\"%s\", "
@@ -1055,56 +1504,49 @@ string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& ht
              "\"%s\":\"%s\", \"%s\":%d, "
              "\"%s\":%d, "
              "} ] }", 
-             status, kDetailAllocationID, flow_itr->allocation_id_.c_str(),
-             kDetailStartTime, flow_itr->start_time_, kDetailEndTime, flow_itr->end_time_,
+             status,
+             kDetailAllocationID, our_flow.allocation_id_.c_str(),
              kDetailState, state.c_str(), 
-             kDetailBandwidth, flow_itr->bandwidth_,
-             kDetailUserID, flow_itr->user_id_.c_str(),
-             kDetailProjectID, flow_itr->project_id_.c_str(),
-             kDetailSrcIP, flow_itr->src_ip_.c_str(), kDetailSrcPort, flow_itr->src_port_,
-             kDetailDstIP, flow_itr->dst_ip_.c_str(), kDetailDstPort, flow_itr->dst_port_,
-             kDetailDuration, flow_itr->duration_);
+             kDetailBandwidth, our_flow.bandwidth_,
+             kDetailUserID, our_auth.user_id_.c_str(),
+             kDetailProjectID, our_auth.project_id_.c_str(),
+             kDetailSrcIP, our_flow.src_ip_.c_str(),
+             kDetailSrcPort, our_flow.src_port_,
+             kDetailDstIP, our_flow.dst_ip_.c_str(),
+             kDetailDstPort, our_flow.dst_port_,
+             kDetailDuration, our_flow.duration_);
 
     logger.Log(LOG_NOTICE, "Processed GET allocations (%s:%s, %s:%s) from %s.",
-               kDetailAllocationID, flow_itr->allocation_id_.c_str(),
-               kDetailAPIKey, flow_itr->api_key_.c_str(),
+               kDetailAllocationID, our_flow.allocation_id_.c_str(),
+               kDetailAPIKey, our_flow.api_key_.c_str(),
                peer->hostname().c_str());
-
-#if DEBUG_MUTEX_LOCK
-    warnx("conga_process_get_allocations: releasing request list lock.");
-#endif
-    pthread_mutex_unlock(flow_list_mtx);
-
   } else {
-    // User wants to list all flows that they are associated with.
-    if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString() ||
-        !details.HasMember(kDetailProjectID) || !details[kDetailProjectID].IsString()) {
-      error.Init(EX_DATAERR, "conga_process_get_allocations(): %s or %s is invalid: %s",
-                 kDetailAPIKey, kDetailProjectID, msg_body.c_str());
-      return "";
-    }
+    // User wants to list all flows that they are associated with her key.
 
-    int status = 0;
-    snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ ", status);
+    int status = 0;  // TODO(aka) how do we update status if something fails below?
 
+    snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1,
+             "{ \"status\":%d, \"results\": [ ", status);
+
+    // Loop over all flows that use our API key ...
 #if DEBUG_MUTEX_LOCK
-    warnx("conga_process_get_allocations: requesting request list lock.");
+    warnx("conga_process_get_allocations: requesting flow list lock.");
 #endif
     pthread_mutex_lock(flow_list_mtx);
     list<FlowInfo>::iterator flow_itr = flows->begin();
     while (flow_itr != flows->end()) {
       string key = flow_itr->api_key_;
+      // API key is *not* case-sensitive!
       std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-      if (!key.compare(details[kDetailAPIKey].GetString())) {
+      if (!key.compare(our_auth.api_key_)) {
 
-        logger.Log(LOG_EMERG, "conga_process_get_allocations(): TODO(aka) Add code to get status!");
+        logger.Log(LOG_EMERG, "conga_process_get_allocations(): XXX TODO(aka) Add code to get status!");
         string state = "running";
 
         // Add flow info to response message.
         snprintf((char*)ret_msg.c_str() + strlen(ret_msg.c_str()),
                  (kHTTPMsgBodyMaxSize - 1) - strlen(ret_msg.c_str()),
                  "{ \"%s\":\"%s\", "
-                 "\"%s\": %d, \"%s\": %d, "
                  "\"%s\":\"%s\", "
                  "\"%s\":%d, "
                  "\"%s\":\"%s\", \"%s\":\"%s\", "
@@ -1112,13 +1554,14 @@ string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& ht
                  "\"%s\":\"%s\", \"%s\":%d, "
                  "\"%s\":%d, }, ",
                  kDetailAllocationID, flow_itr->allocation_id_.c_str(),
-                 kDetailStartTime, flow_itr->start_time_, kDetailEndTime, flow_itr->end_time_,
                  kDetailState, state.c_str(), 
                  kDetailBandwidth, flow_itr->bandwidth_,
-                 kDetailUserID, flow_itr->user_id_.c_str(),
-                 kDetailProjectID, flow_itr->project_id_.c_str(),
-                 kDetailSrcIP, flow_itr->src_ip_.c_str(), kDetailSrcPort, flow_itr->src_port_,
-                 kDetailDstIP, flow_itr->dst_ip_.c_str(), kDetailDstPort, flow_itr->dst_port_,
+                 kDetailUserID, our_auth.user_id_.c_str(),
+                 kDetailProjectID, our_auth.project_id_.c_str(),
+                 kDetailSrcIP, flow_itr->src_ip_.c_str(),
+                 kDetailSrcPort, flow_itr->src_port_,
+                 kDetailDstIP, flow_itr->dst_ip_.c_str(),
+                 kDetailDstPort, flow_itr->dst_port_,
                  kDetailDuration, flow_itr->duration_);
       }
 
@@ -1129,13 +1572,13 @@ string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& ht
              (kHTTPMsgBodyMaxSize - 1) - strlen(ret_msg.c_str()), "] }");
 
 #if DEBUG_MUTEX_LOCK
-    warnx("conga_process_get_allocations: releasing request list lock.");
+    warnx("conga_process_get_allocations: releasing flow list lock.");
 #endif
     pthread_mutex_unlock(flow_list_mtx);
 
     logger.Log(LOG_NOTICE, "Processed GET allocations (%s:%s, %s:%s) from %s.",
-               kDetailAPIKey, flow_itr->api_key_.c_str(),
-               kDetailProjectID, flow_itr->project_id_.c_str(),
+               kDetailAPIKey, our_auth.api_key_.c_str(),
+               kDetailProjectID, our_auth.project_id_.c_str(),
                peer->hostname().c_str());
   }
 

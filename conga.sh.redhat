@@ -1,0 +1,73 @@
+#! /bin/sh
+#
+# /etc/init.d/conga
+#
+# conga	       Start/Stop Conga web service
+#
+# chkconfig:   345 95 03 
+# description: This is a daemon to handle Conga web requests.  Conga is \
+#              a RESTful manager to setup flows through SDN switches.
+# processname: conga
+# config:      /var/lib/conga/conga.conf
+# pidfile:     /var/run/conga.pid
+#
+# Debian init.d method:
+### BEGIN INIT INFO
+# Provides:          conga
+# Required-Start:    $network $local_fs $remote_fs
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: start Conga daemon (conga)
+### END INIT INFO
+
+# $Id: conga.sh.redhat,v 1.8 2014/01/23 17:32:57 akadams Exp $
+
+# Source function library.
+. /etc/init.d/functions
+
+PATH=/sbin:/usr/sbin:/usr/local/sbin:/bin:/usr/bin:/usr/local/bin
+HOME=/var/lib/conga
+
+# Make sure daemon is there
+test -x /usr/local/bin/conga || exit 1
+
+start() {
+	echo -n $"Starting conga: "
+	cd $HOME
+	touch /var/log/conga.log && chown conga:conga /var/log/conga.log
+        daemon --user conga /usr/local/bin/conga -Lfile=/var/log/conga.log:info -c /usr/local/etc/conga.conf -4 -d 127.0.0.1 -u conga -t &
+
+	# TODO(aka) Add test to make sure service is up before locking!
+	touch /var/lock/subsys/conga
+	return $?
+}
+
+stop() {
+	echo -n $"Stopping conga: "
+	killproc conga -TERM
+	rm -f /var/lock/subsys/conga
+	return $?
+}
+
+case "$1" in
+    start)
+	start
+        ;;
+    restart|reload|force-reload)
+        echo "Error: argument '$1' not supported" >&2
+        exit 3
+        ;;
+    stop)
+	stop
+        ;;
+    status)
+	status conga
+	;;
+    *)
+        echo "Usage: $0 [start|stop]"
+        exit 1
+        ;;
+esac
+
+exit $?

@@ -8,9 +8,9 @@
 #ifndef CONFINFO_H_
 #define CONFINFO_H_
 
-#include <arpa/inet.h>
+#include <arpa/inet.h>              // for in_port_t
 
-#include <stdint.h>
+#include <sys/types.h>              // for uid_t, gid_t
 
 #include <string>
 using namespace std;
@@ -22,6 +22,7 @@ class ConfInfo {
     v4_enabled_ = false;
     v6_enabled_ = false;
     multi_threaded_ = false;
+    duration_ = 86400;  // as a default, make it 24 hours
  }
 
   // Update lamport time.
@@ -33,27 +34,30 @@ class ConfInfo {
   // TODO(aka) For now, all data members are public ... we'll abstract
   // them later when we figure out what we need and don't need.
 
+  // For server.
+  uid_t uid_;                 // who we want to run as after dropping root
+  gid_t gid_;
   in_port_t port_;
   bool v4_enabled_;           // flags to show we will use v4
   bool v6_enabled_;           // flags to show we will use v6
   int log_to_stderr_;
   string census_data_path_;
   bool multi_threaded_;       // flag to enabled multi-threading
+  string conf_file_;          // file holding configuration options
+  int duration_;              // how long an AuthInfo should be valid for
 
-  // For client.
+  // For client.  TODO(aka) Not currently used, as we have no client!
   string peer_;
   in_port_t peer_port_;
 
+  // For database access.  TODO(aka) I'm thinking this should be for the authDB!
   string database_;           // MySQL database's IP address (holding Geo Data)
   in_port_t database_port_;   // database's port
   string database_user_;      // database's port
   string database_db_;        // Geo Data database name (within MySQL database)
-  string tar_path_;           // path to tar executible
-  string conf_file_;          // file holding configuration options
-
-  //uint8_t id_;              // this nodes process number (or id) as an int
 
   // The following are for experimenting with BasicFraming msg-hdrs.
+  // TOOD(aka) XXX We need to rip this out now ...
   int id_;
   uint16_t lamport_;
   int established_connections_;

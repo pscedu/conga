@@ -52,7 +52,9 @@ const in_port_t kServerPort = CONGA_SERVER_PORT;
 
 int main(int argc, char* argv[]) {
   ConfInfo conf_info;           // configuration information
-  list<FlowInfo> flows;         // flows currently active
+  list<AuthInfo> api_keys;      // credentials currently active
+  pthread_mutex_t api_keys_mtx;
+  list<FlowInfo> flows;         // flows currently active (indexed by AuthInfo)
   pthread_mutex_t flow_list_mtx;
   list<SSLSession> to_peers;    // initated connections (to other nodes)
   //pthread_mutex_t to_peers_mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -76,6 +78,8 @@ int main(int argc, char* argv[]) {
   // Set default values (can be overridden by user).
   conf_info.log_to_stderr_ = 0;
   conf_info.port_ = kServerPort;
+  conf_info.uid_ = getuid();
+  conf_info.gid_ = getgid();
   /*
   conf_info.database_ = "127.0.0.1";
   conf_info.database_port_ = 3306;
@@ -85,6 +89,7 @@ int main(int argc, char* argv[]) {
 
   logger.set_proc_name("conga");
 
+  pthread_mutex_init(&api_keys_mtx, NULL);
   pthread_mutex_init(&flow_list_mtx, NULL);
   pthread_mutex_init(&to_peers_mtx, NULL);
   pthread_mutex_init(&from_peers_mtx, NULL);
@@ -132,10 +137,22 @@ int main(int argc, char* argv[]) {
   // Setup/initialize SSL.
   // HACK: const char* server_id = process_name(conf_info.Proc_ID());
   const char* server_id = "conga-tls";
-  ssl_context.Init(TLSv1_method(), server_id,
-                   "limbo.psc.edu.key.pem", "/home/pscnoc/conga/certs", SSL_FILETYPE_PEM, NULL, 
-                   "limbo.psc.edu.crt.pem", "/home/pscnoc/conga/certs", SSL_FILETYPE_PEM, 
-                   SSL_VERIFY_NONE, 2, SSL_SESS_CACHE_OFF, SSL_OP_CIPHER_SERVER_PREFERENCE);
+  if (getuid() == 0)  // XXX Need to move cert locations to command-line or config file!
+    ssl_context.Init(TLSv1_method(), server_id,
+                     "limbo.psc.edu.key.pem", "/etc/ssl/private",
+                     SSL_FILETYPE_PEM, NULL, 
+                     "limbo.psc.edu.crt.pem", "/etc/ssl/certs",
+                     SSL_FILETYPE_PEM, 
+                     SSL_VERIFY_NONE, 2, SSL_SESS_CACHE_OFF,
+                     SSL_OP_CIPHER_SERVER_PREFERENCE);
+  else
+    ssl_context.Init(TLSv1_method(), server_id,
+                     "limbo.psc.edu.key.pem", "/home/pscnoc/conga/certs",
+                     SSL_FILETYPE_PEM, NULL, 
+                     "limbo.psc.edu.crt.pem", "/home/pscnoc/conga/certs",
+                     SSL_FILETYPE_PEM, 
+                     SSL_VERIFY_NONE, 2, SSL_SESS_CACHE_OFF,
+                     SSL_OP_CIPHER_SERVER_PREFERENCE);
 #if 0  // XXX Additional ssl context suff that should be in Init()
   ssl_context.Load_CA_List(conf_info.Base_Path(), SAMI_CA_CERTS_DIR);
   String egd_path = conf_info.Base_Path() + "tmp/entropy";
@@ -146,17 +163,6 @@ int main(int argc, char* argv[]) {
   if (error.Event())
     errx(EXIT_FAILURE, "%s", error.print().c_str());
 
-  // Daemonize program.
-
-  // TODO(aka) Need to add daemonizing stuff.
-
-  // Initialze more globals & externals: PRNG, signals
-  srandom(time(NULL));  // TODO(aka) We really need to use srandomdev() here!
-
-#if 0
-  sig_handler.Init();  // TODO(aka) need to add signal handling routines
-#endif
-
   if (!conf_info.v4_enabled_ && !conf_info.v6_enabled_)
     conf_info.v4_enabled_ = true;  // give us something
 
@@ -166,7 +172,7 @@ int main(int argc, char* argv[]) {
     tmp_server.InitServer(AF_INET);  // listen on all IPv4 interfaces
     tmp_server.set_blocking();
     tmp_server.set_close_on_exec();
-    tmp_server.Socket(PF_INET, SOCK_STREAM, 0, ssl_context);
+    tmp_server.Socket(PF_INET, SOCK_STREAM, 0, &ssl_context);
     tmp_server.Bind(conf_info.port_);
     tmp_server.Listen(TCPCONN_DEFAULT_BACKLOG);
     if (error.Event()) {
@@ -181,7 +187,7 @@ int main(int argc, char* argv[]) {
     tmp_server.InitServer(AF_INET6);  // listen on all interfaces ...
     tmp_server.set_blocking();
     tmp_server.set_close_on_exec();
-    tmp_server.Socket(PF_INET6, SOCK_STREAM, 0, ssl_context);
+    tmp_server.Socket(PF_INET6, SOCK_STREAM, 0, &ssl_context);
     int v6_only = 1;
     tmp_server.Setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, &v6_only, 
                           sizeof(v6_only));  // ... *only* IPv6 interfaces
@@ -196,6 +202,28 @@ int main(int argc, char* argv[]) {
   }
 
   logger.Log(LOG_NOTICE, "conga (%s) starting on port %hu.", SERVER_VERSION, conf_info.port_);
+
+  // Daemonize program.
+  if (getuid() == 0) {
+    // Process is running as root, drop privileges.
+    if (setgid(conf_info.gid_) != 0)
+      err(EX_OSERR, "setgid() failed: %s", strerror(errno));
+    if (setuid(conf_info.uid_) != 0)
+      err(EX_OSERR, "setuid() failed: %s", strerror(errno));
+
+    // Sanity check ...
+    if (setuid(0) != -1)
+      err(EX_OSERR, "ERROR: Conga managed to re-acquire root privileges!");
+  }
+
+  // TODO(aka) Need to add daemonizing stuff.
+
+  // Initialze more globals & externals: PRNG, signals
+  srandom(time(NULL));  // TODO(aka) We really need to use srandomdev() here!
+
+#if 0
+  sig_handler.Init();  // TODO(aka) need to add signal handling routines
+#endif
 
   // Any work prior to the main event loop?
   time_t state_poll_timeout = time(NULL);
@@ -364,7 +392,8 @@ int main(int argc, char* argv[]) {
                 !from_peer->IsIncomingMsgBeingProcessed()) {
               // Build struct for function arguments.
               struct conga_incoming_msg_args args = {
-                &conf_info, ssl_context, &flows, &flow_list_mtx,
+                &conf_info, &ssl_context, &api_keys, &api_keys_mtx, 
+                &flows, &flow_list_mtx,
                 &to_peers, &to_peers_mtx, from_peer, from_peers.end(), 
                 &thread_list, &thread_list_mtx,
               };
@@ -382,8 +411,10 @@ int main(int argc, char* argv[]) {
                          tid, from_peer->print().c_str());
             } else if (!conf_info.multi_threaded_) {
               // Process message single threaded.
-              conga_process_incoming_msg(&conf_info, ssl_context, &flows, &flow_list_mtx,
-                                         &to_peers, &to_peers, from_peer);
+              conga_process_incoming_msg(&conf_info, &ssl_context,
+                                         &api_keys, &api_keys_mtx, 
+                                         &flows, &flow_list_mtx,
+                                         &to_peers, &to_peers_mtx, from_peer);
               if (error.Event()) {
                 // Note, if we reached here, then we could not NACK the
                 // error we encountered processing the message in
@@ -426,7 +457,7 @@ int main(int argc, char* argv[]) {
           if (!from_peer->IsConnected() ||  
               (!from_peer->IsOutgoingDataPending() &&
                !from_peer->rbuf_len() && 
-               !from_peer->IsIncomingDataInitialized())) {
+               !from_peer->IsIncomingMsgInitialized())) {
             // Make sure, if we're multi-threaded, that the thread
             // isn't still running.
 
@@ -469,7 +500,7 @@ int main(int argc, char* argv[]) {
 
           /*
           // TODO(aka) Spot for final check to see if something whet wrong ...
-          if (!from_peer->IsIncomingDataInitialized() && 
+          if (!from_peer->IsIncomingMsgInitialized() && 
               from_peer->rbuf_len() > 0) {
             // Something went wrong, report the error and remove the peer.
             logger.Log(LOG_ERR, "main(): "
@@ -533,7 +564,10 @@ int main(int argc, char* argv[]) {
             // (as we did with from_peers).
 
             // Process message single threaded.
-            conga_process_incoming_msg(&conf_info, to_peer);
+            conga_process_incoming_msg(&conf_info, &ssl_context,
+                                       &api_keys, &api_keys_mtx, 
+                                       &flows, &flow_list_mtx,
+                                       &to_peers, &to_peers_mtx, from_peer);
             if (error.Event()) {
               // Note, if we reached here, then we could not NACK the
               // error we encountered processing the message in
@@ -589,7 +623,7 @@ int main(int argc, char* argv[]) {
           if (!to_peer->IsConnected() && 
               !to_peer->IsOutgoingDataPending() &&
               !to_peer->rbuf_len() && 
-              !to_peer->IsIncomingDataInitialized()) {
+              !to_peer->IsIncomingMsgInitialized()) {
             //logger.Log(LOG_INFO, "main(timeout): checking if to_peer: %s, can be removed.", to_peer->print().c_str());
 
             if (conf_info.multi_threaded_) {
@@ -627,7 +661,7 @@ int main(int argc, char* argv[]) {
 
           /*
           // TODO(aka) Spot for final check to see if something whet wrong ...
-          if (!to_peer->IsIncomingDataInitialized() && 
+          if (!to_peer->IsIncomingMsgInitialized() && 
               to_peer->rbuf_len() > 0) {
             // Something went wrong, report the error and remove the peer.
             logger.Log(LOG_ERR, "main(): "
@@ -677,7 +711,7 @@ int main(int argc, char* argv[]) {
           // all errors internally in ssl_event_accept().
 
           ssl_event_accept(conf_info, servers[j], kMaxPeers, kFramingType,
-                           ssl_context, &from_peers);
+                           &ssl_context, &from_peers);
 #if DEBUG_MUTEX_LOCK
           warnx("main(listen): releasing from_peers lock.");
 #endif
@@ -735,7 +769,7 @@ int main(int argc, char* argv[]) {
             ssl_event_read(conf_info, peer);
             // ssl_event_read(conf_info, &(*peer));  // note, iterator hack
 
-            if (!peer->IsIncomingDataInitialized()) {
+            if (!peer->IsIncomingMsgInitialized()) {
               peer->InitIncomingMsg();
               //logger.Log(LOG_INFO, "main(POLLIN): post-init to_peer: %s.", peer->print().c_str());
             }
@@ -783,7 +817,7 @@ int main(int argc, char* argv[]) {
               ssl_event_read(conf_info, peer);
               // ssl_event_read(conf_info, &(*peer));  // note, iterator hack
 
-              if (!peer->IsIncomingDataInitialized())
+              if (!peer->IsIncomingMsgInitialized())
                 peer->InitIncomingMsg();
               if (error.Event()) {
                 logger.Log(LOG_ERR, "main(POLLIN): "

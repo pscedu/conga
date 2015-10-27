@@ -17,15 +17,18 @@ using namespace std;
 
 #include "SSLSession.h"
 #include "ConfInfo.h"
+#include "AuthInfo.h"
 #include "FlowInfo.h"
 
-#define CONGA_SERVER_PORT 13500
+#define CONGA_SERVER_PORT 443  // https
 
 struct conga_incoming_msg_args {
   ConfInfo* info;
   SSLContext* ssl_context;
-  list<FlowInfo>* requests;
-  pthread_mutex_t* request_list_mtx;
+  list<AuthInfo>* api_keys;
+  pthread_mutex_t* api_keys_mtx;
+  list<FlowInfo>* flows;
+  pthread_mutex_t* flow_list_mtx;
   list<SSLSession>* to_peers;
   pthread_mutex_t* to_peers_mtx;
   list<SSLSession>::iterator peer;
@@ -37,8 +40,12 @@ struct conga_incoming_msg_args {
 const char kCONGAMsgDelimiter = ':';
 
 bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context, 
-                                list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx,
-                                list<SSLSession>* to_peers, pthread_mutex_t* to_peers_mtx, 
+                                list<AuthInfo>* api_keys, 
+                                pthread_mutex_t* api_keys_mtx,
+                                list<FlowInfo>* flows, 
+                                pthread_mutex_t* flow_list_mtx,
+                                list<SSLSession>* to_peers,
+                                pthread_mutex_t* to_peers_mtx, 
                                 list<SSLSession>::iterator peer);
 void* conga_concurrent_process_incoming_msg(void* args);
 void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
@@ -47,24 +54,54 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                             list<MsgHdr>::iterator req_hdr);
 string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                                const string& msg_body, const File& msg_data,
-                               SSLContext* ssl_context, list<SSLSession>::iterator peer, 
-                               list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx);
+                               SSLContext* ssl_context, 
+                               list<AuthInfo>* api_keys, 
+                               pthread_mutex_t* api_keys_mtx,
+                               list<SSLSession>::iterator peer);
+string conga_process_delete_auth(const ConfInfo& info,
+                                 const HTTPFraming& http_hdr,
+                                 const string& msg_body, const File& msg_data,
+                                 list<AuthInfo>* api_keys, 
+                                 pthread_mutex_t* api_keys_mtx,
+                                 list<SSLSession>::iterator peer);
 string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                               const string& msg_body, const File& msg_data,
-                              list<SSLSession>::iterator peer, 
-                              list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx);
-string conga_process_post_allocations(const ConfInfo& info, const HTTPFraming& http_hdr,
-                                      const string& msg_body, const File& msg_data,
-                                      list<SSLSession>::iterator peer, 
-                                      list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx);
-string conga_process_get_allocations(const ConfInfo& info, const HTTPFraming& http_hdr,
-                                     const string& msg_body, const File& msg_data,
-                                     list<SSLSession>::iterator peer, 
-                                     list<FlowInfo>* flows, pthread_mutex_t* flow_list_mtx);
+                              list<AuthInfo>* api_keys, 
+                              pthread_mutex_t* api_keys_mtx,
+                              list<SSLSession>::iterator peer);
+string conga_process_post_allocations(const ConfInfo& info,
+                                      const HTTPFraming& http_hdr,
+                                      const string& msg_body,
+                                      const File& msg_data,
+                                      list<AuthInfo>* api_keys, 
+                                      pthread_mutex_t* api_keys_mtx,
+                                      list<FlowInfo>* flows,
+                                      pthread_mutex_t* flow_list_mtx,
+                                      list<SSLSession>::iterator peer);
+string conga_process_delete_allocations(const ConfInfo& info, 
+                                        const HTTPFraming& http_hdr,
+                                        const string& msg_body,
+                                        const File& msg_data,
+                                        list<AuthInfo>* api_keys, 
+                                        pthread_mutex_t* api_keys_mtx,
+                                        list<FlowInfo>* flows,
+                                        pthread_mutex_t* flow_list_mtx,
+                                        list<SSLSession>::iterator peer);
+string conga_process_get_allocations(const ConfInfo& info, 
+                                     const HTTPFraming& http_hdr,
+                                     const string& msg_body,
+                                     const File& msg_data,
+                                     list<AuthInfo>* api_keys, 
+                                     pthread_mutex_t* api_keys_mtx,
+                                     list<FlowInfo>* flows,
+                                     pthread_mutex_t* flow_list_mtx,
+                                     list<SSLSession>::iterator peer);
 
-void conga_gen_http_error_response(const ConfInfo& info, const HTTPFraming& http_hdr, 
+void conga_gen_http_error_response(const ConfInfo& info,
+                                   const HTTPFraming& http_hdr, 
                                    list<SSLSession>::iterator peer);
-void conga_gen_http_response(const ConfInfo& info, const HTTPFraming& http_hdr, const string msg,
+void conga_gen_http_response(const ConfInfo& info,
+                             const HTTPFraming& http_hdr, const string msg,
                              list<SSLSession>::iterator peer);
 
 #if 0  // Deprecated.

@@ -32,16 +32,16 @@ static const char* conf_file_default = "conga.conf";
 // Routine to print out "usage" information.
 void usage(void) {
   fprintf(stderr, "Usage: conga [-46htVvq] [-c config_file] "
-          "[-d database_server]\n"
+          "[-d auth key duration ]\n"
           "\t[-L log_device[[:log_level],...]\n"
-          "\t[-p network port] [-u database_user]\n");
+          "\t[-p network port]\n");
 }
 
 // Routine to parse command line options and load values into the
 // global ConfInfo struct.
 int parse_command_line(int argc, char* argv[], ConfInfo* info) {
   extern char* optarg;
-  const char* getopt_flags = "46A:a:B:b:c:D:d:F:f:HhI:i:K:k:L:l:M:m:N:n:O:o:p:qS:s:TtU:u:Vv?";
+  const char* getopt_flags = "46A:a:B:b:c:D:d:F:f:G:g:HhI:i:K:k:L:l:M:m:N:n:O:o:p:qS:s:TtU:u:Vv?";
 
   // Loop on argv options.
   int ch;
@@ -58,8 +58,10 @@ int parse_command_line(int argc, char* argv[], ConfInfo* info) {
       case 'A' :
         // Fall-through.
 
-      case 'a' :
-        warn("parse_command_line(): option a not supported.");
+      case 'a' :  // Authorization Database IP address
+        if (!optarg)
+          errx(EX_CONFIG, "parse_command_line(): NULL database.");  // die horribly
+        info->database_ = optarg;
         break;
 
       case 'B' :
@@ -79,10 +81,10 @@ int parse_command_line(int argc, char* argv[], ConfInfo* info) {
       case 'D' :
         // Fall-through.
 
-      case 'd' :  // Database IP address
+      case 'd' :  // API Key Duration
         if (!optarg)
-          errx(EX_CONFIG, "parse_command_line(): NULL database.");  // die horribly
-        info->database_ = optarg;
+          errx(EX_CONFIG, "parse_command_line(): NULL duration.");  // die horribly
+        info->duration_ = atoi(optarg);
         break;
 
       case 'E' :  // Errors are fatal
@@ -94,6 +96,15 @@ int parse_command_line(int argc, char* argv[], ConfInfo* info) {
 
       case 'f' :
         warn("parse_command_line(): option f not supported.");
+        break;
+
+      case 'G' :
+        // Fall-through.
+
+      case 'g' :  // Group ID to run as
+        if (!optarg)
+          errx(EX_CONFIG, "parse_command_line(): NULL gid.");  // die horribly
+        info->gid_ = atoi(optarg);
         break;
 
       case 'H' :
@@ -177,17 +188,20 @@ int parse_command_line(int argc, char* argv[], ConfInfo* info) {
         info->multi_threaded_ = true;
         break;
 
-      case 'U' :
-        // Fall-through
-
-      case 'u' :  // database User
+      case 'U' :  // database User
         if (!optarg)
           errx(EX_CONFIG, "parse_command_line(): "
                "NULL database User.");  // die horribly
-
         info->database_user_ = optarg;
         break;
       
+      case 'u' :  // Uid to run as
+        if (!optarg)
+          errx(EX_CONFIG, "parse_command_line(): NULL uid.");  // die horribly
+        info->uid_ = atoi(optarg);
+        break;
+      
+
       case 'V' :  // Version
         fprintf(stdout, "%s\n", SERVER_VERSION);
         exit(0);

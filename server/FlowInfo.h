@@ -1,6 +1,6 @@
 /* $Id: FlowInfo.h,v 1.9 2014/02/24 18:06:00 akadams Exp $ */
 
-// FlowInfo Class: library for information used during plots.
+// FlowInfo Class: meta-data for setting up flows
 
 // Copyright © 2009, Pittsburgh Supercomputing Center (PSC).  
 // See the file 'COPYRIGHT.txt' for any restrictions.
@@ -19,8 +19,8 @@ using namespace std;
 
 // Non-class specific defines & data structures.
 
-// FlowInfo Class: A class to hold all necessary meta-data (as an
-// instance) needed to produce a plot from a request.
+// FlowInfo Class: A class to hold all necessary meta-data to setup
+// flows.
 class FlowInfo {
  public:
 
@@ -30,14 +30,9 @@ class FlowInfo {
   // Flow details.
   string allocation_id_;      // unique token for this flow (TODO(aka) should be call flow_id!)
 
-  string api_key_;            // API-Key associated with this flow (keys map to user/grant)
-  string user_id_;
-  string project_id_;         // matches grant # in auth database
-  string resource_id_;
+  string api_key_;            // API-Key authorizing this flow (maps to AuthInfo)
 
   int bandwidth_;
-  int start_time_;
-  int end_time_;
   //string expires_in_;
   int duration_;
 
@@ -58,7 +53,13 @@ class FlowInfo {
   virtual ~FlowInfo(void) { };
 
   // Copy constructor.
-  FlowInfo(const FlowInfo& src);  // use system default 
+  FlowInfo(const FlowInfo& src)
+  : allocation_id_(src.allocation_id_), api_key_(src.api_key_),
+    src_ip_(src.src_ip_), dst_ip_(src.dst_ip_), peer_(src.peer_) {
+    bandwidth_ = src.bandwidth_;
+  //expires_in_.clear();
+    duration_ = src.duration_;
+  }
 
   // Accessors & mutators.
   void clear(void);
