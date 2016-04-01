@@ -77,22 +77,33 @@ static const char* kDetailIsActive = "is_active";
 
 static const size_t kAPIKeySize = 16;
 
+// RYU elements.
+static const char* kNameMeterID = "meter_id";
+static const char* kNameBandStats = "band_stats";
+static const char* kNameBands = "bands";
+static const char* kNameRate = "rate";
+static const char* kNameByteBandCount = "byte_band_count";
+static const char* kNameByteInCount = "byte_in_count";
+
 static size_t allocation_id_cnt = 0;
 
-// Routine to process a ready (incoming) message in our SSLSession
+// Routine to process a ready (incoming) message in our TCPSession
 // object.  This routine must deal with both the message framing *and*
 // the application (to know what routines to call for message
 // processing).
 //
 // This routine can set an ErrorHandler event.
 bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context, 
+                                //const string& dpid,
+                                list<MeterInfo>* sdn_state,
+                                pthread_mutex_t* sdn_state_mtx,
                                 list<AuthInfo>* api_keys, 
                                 pthread_mutex_t* api_keys_mtx,
                                 list<FlowInfo>* flows,
                                 pthread_mutex_t* flow_list_mtx,
-                                list<SSLSession>* to_peers,
+                                list<TCPSession>* to_peers,
                                 pthread_mutex_t* to_peers_mtx, 
-                                list<SSLSession>::iterator peer) {
+                                list<TCPSession>::iterator peer) {
   if (&(*peer) == NULL) {  // note iterator hack
     error.Init(EX_SOFTWARE, "conga_process_incoming_msg(): peer is NULL");
     return false;
@@ -103,9 +114,9 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
     //logger.Log(LOG_DEBUG, "conga_process_incoming_msg(): Working with header: %s.", peer->rhdr().print().c_str());
 
     // First, make a copy of the incoming msg and remove the *original*
-    // data from the SSLSession (i.e., either rbuf_ or rfile_ (along
+    // data from the TCPSession (i.e., either rbuf_ or rfile_ (along
     // with rhdr_)).  We *trade-off* the cost of the buffer copy in-order
-    // for us to multi-thread different messages within the same SSLSession,
+    // for us to multi-thread different messages within the same TCPSession,
     // i.e., we need to clear out the incoming message ASAP!
 
     const MsgHdr msg_hdr = peer->rhdr();
@@ -183,14 +194,14 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
                    "for current message-header %s.", 
                    req_hdr->print().c_str(), msg_hdr.print().c_str());
 
-        // Process message based on our application.  Note, client calls
-        // exit(3) in this routine.
-
+        // Process message based on our application.
         conga_process_response(*info, msg_hdr, msg_body, msg_data,
+                               sdn_state, sdn_state_mtx,
                                peer, req_hdr);
 
-        // NOT-REACHABLE
-        peer->delete_whdr(req_hdr);  // clean-up whdrs, since we found the hdr
+        peer->delete_whdr(req_hdr->msg_id());  // clean-up whdrs,
+                                               // since we found the
+                                               // hdr
       } else {
         logger.Log(LOG_ERROR, "conga_process_incoming_msg(): TODO(aka) "
                    "Unable to find our REQUEST header associated with the "
@@ -200,12 +211,12 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
       }
 
       // Since this was a RESPONSE, if we don't have any more business
-      // with this peer we can shutdown the connection.  (The SSLSession
+      // with this peer we can shutdown the connection.  (The TCPSession
       // will be removed in tcp_event_chk_stale_connections()).
 
       if (peer->rbuf_len() || peer->IsOutgoingDataPending() ||
           peer->whdrs().size()) {
-        logger.Log(LOG_INFO, "conga_process_incoming_msg(): "
+        logger.Log(LOG_WARNING, "conga_process_incoming_msg(): "
                    "peer (%s) still has %ld bytes in rbuf, or "
                    "%d messages in wpending, or %d REQUEST headers left, "
                    "so not removing from queue.", 
@@ -235,12 +246,13 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
 
             logger.Log(LOG_INFO, "Received REQUEST (%s) from %s, "
                        "content-type: %s.",
-                       http_hdr.print_start_line().c_str(),
+                       http_hdr.print_start_line(false).c_str(),
                        peer->hostname().c_str(), 
                        http_hdr.content_type().c_str());
 
             string service = url.path();
-            std::transform(service.begin(), service.end(), service.begin(), ::tolower);
+            std::transform(service.begin(), service.end(), service.begin(), 
+                           ::tolower);
 
             // TODO(aka) Deprecated.
             // First, see if this is a WSDL service REQUEST, if so, mark it.
@@ -337,7 +349,8 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
                 // Report the error.  NACK sent outside of switch() {} block.
                 error.Init(EX_SOFTWARE, "conga_process_incoming_msg(): "
                            "unknown method: %d in REQUEST %s", 
-                           http_hdr.method(), http_hdr.print_hdr(0).c_str());
+                           http_hdr.method(), 
+                           http_hdr.print_hdr(0, false).c_str());
                 break;
             }  // switch (msg_hdr.basic_hdr().method()) {
 
@@ -368,7 +381,7 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
               // ... and log what we processed.
               logger.Log(LOG_NOTICE, "Processed HTTP REQUEST (%s) from %s; "
                          "is awaiting delivery.",
-                         http_hdr.print_start_line().c_str(), 
+                         http_hdr.print_start_line(false).c_str(), 
                          peer->print().c_str());
             }
 
@@ -403,7 +416,7 @@ void* conga_concurrent_process_incoming_msg(void* ptr) {
   // TODO(aka) Change this so that all we pass in is the index to the
   // global that holds our arguments.  Main can then *clean-up* the
   // global storage once this thread exits (by marking the boolean
-  // flag in the global!
+  // flag in the global!  Uh, I think this was done ...
 
   struct conga_incoming_msg_args* args = (struct conga_incoming_msg_args*)ptr;
 
@@ -417,6 +430,7 @@ void* conga_concurrent_process_incoming_msg(void* ptr) {
 
   // Process the *complete* message.
   conga_process_incoming_msg(args->info, args->ssl_context, 
+                             args->sdn_state, args->sdn_state_mtx,
                              args->api_keys, args->api_keys_mtx,
                              args->flows, args->flow_list_mtx,
                              args->to_peers, args->to_peers_mtx, args->peer);
@@ -456,39 +470,266 @@ void* conga_concurrent_process_incoming_msg(void* ptr) {
   return (NULL);
 }
 
-// Routine to process a RESPONSE "message-body".  Note, this routine
-// should only be called by a client.
+// Routine to process a RESPONSE "message-body".
 //
 // TOOD(aka) We only need the HTTPFraming header in here, not MsgHdr ...
 void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                             const string& msg_body, const File& msg_data,
-                            list<SSLSession>::iterator peer, 
+                            // XXX const string& dpid,
+                            list<MeterInfo>* sdn_state,
+                            pthread_mutex_t* sdn_state_mtx,
+                            // XXX list<FlowInfo>* flows, 
+                            // pthread_mutex_t* flow_list_mtx,
+                            list<TCPSession>::iterator peer, 
                             list<MsgHdr>::iterator req_hdr) {
   if (msg_hdr.http_hdr().status_code() == 200) {
-    // If we have a file, report its successful return.
-    if (msg_data.Exists(NULL) && msg_data.size(NULL) > 0)
-      logger.Log(LOG_NOTICE, "Received RESPONSE \'%d %s\' with file: %s, "
-                 "from %s for REQUEST: %s.", 
-                 msg_hdr.http_hdr().status_code(), 
-                 status_code_phrase(msg_hdr.http_hdr().status_code()),
-                 msg_data.name().c_str(),
-                 peer->TCPConn::print().c_str(), 
-                 req_hdr->http_hdr().print_start_line().c_str());
-    else
-      logger.Log(LOG_NOTICE, 
-                 "Received RESPONSE \'%d %s\' from %s for REQUEST: %s.", 
-                 msg_hdr.http_hdr().status_code(), 
-                 status_code_phrase(msg_hdr.http_hdr().status_code()),
-                 peer->TCPConn::print().c_str(), 
-                 req_hdr->http_hdr().print_start_line().c_str());
-  } else {
+    // Ryu should never send us a file (at least I'm not programming for one).
+    if (msg_data.Exists(NULL) && msg_data.size(NULL) > 0) {
+      error.Init(EX_DATAERR, "conga_process_response(): "
+                 "Recevied a file in message-body from %s, "
+                 "but unable to process", peer->hostname().c_str());
+      return;
+    }
+
+    logger.Log(LOG_NOTICE, 
+               "Received RESPONSE \'%d %s\' from %s for REQUEST: %s.", 
+               msg_hdr.http_hdr().status_code(), 
+               status_code_phrase(msg_hdr.http_hdr().status_code()),
+               peer->TCPConn::print().c_str(), 
+               req_hdr->http_hdr().print_start_line(false).c_str());
+
+#if 0
+    // For Debugging: To see what RapidJSON values are.
+    static const char* kTypeNames[] = { "Null", "False", "True", "Object",
+                                        "Array", "String", "Number" };
+#endif
+
+    // Parse JSON message-body.
+    rapidjson::Document response;
+    if (response.Parse(msg_body.c_str()).HasParseError()) {
+      error.Init(EX_DATAERR, "conga_process_response(): "
+                 "Failed to parse JSON from %s: %s",
+                 peer->hostname().c_str(), msg_body.c_str());
+      return;
+    }
+
+    // Now, see what type & how to process JSON message-body.
+    if (!response.IsObject()) {
+      error.Init(EX_DATAERR, "conga_process_response(): invalid JSON object: %s",
+                 msg_body.c_str());
+      return;
+    }
+
+    rapidjson::Value::ConstMemberIterator dpid_itr = response.MemberBegin();
+    if (dpid_itr == response.MemberEnd() || !dpid_itr->value.IsArray()) {
+      error.Init(EX_DATAERR, "conga_process_response(): "
+                 "First element NULL, empty or not an array: %s",
+                 msg_body.c_str());
+      return;
+    }
+
+    MeterInfo tmp_meter;
+    tmp_meter.dpid_ = dpid_itr->name.GetString();
+
+    // Walk through dpid array, each tuple for stats/meter should consist of:
+    //
+    // { "duration_sec": 2577221, 
+    //   "band_stats": [{
+    //      "byte_band_count": 0, 
+    //      "packet_band_count": 0}],
+    //   "meter_id": 1,
+    //   "flow_count": 0,
+    //   "packet_in_count": 0,
+    //   "duration_nsec": 979000000,
+    //   "len": 56,
+    //   "byte_in_count": 0}
+    //
+    // While stats/meterconfig looks like:
+    //
+    // { "bands": [{
+    //      "burst_size": 0,
+    //      "rate": 1000000,
+    //      "type": "DROP"}],
+    //   "flags": ["KBPS"],
+    //   "meter_id": 1}
+    //
+    // Finally, when we get an allocation request, we'll need to
+    // process a stats/flow response in order to figure out what meter
+    // the flow is in.  It looks like:
+    //
+    // { "actions": [
+    //      "METER:100",
+    //      "SET_FIELD: {
+    //         vlan_vid:8146}",
+    //      "SET_QUEUE:0",
+    //      "OUTPUT:22"],
+    //   "idle_timeout": 0,
+    //   "cookie": 0,
+    //   "packet_count": 0,
+    //   "hard_timeout": 0,
+    //   "byte_count": 0,
+    //   "length": 128,
+    //   "duration_nsec": 352000000,
+    //   "priority": 32768,
+    //   "duration_sec": 2788274,
+    //   "table_id": 30,
+    //   "flags": 0,
+    //   "match": {
+    //      "dl_type": 2048,
+    //      "dl_vlan": "4010",
+    //      "nw_dst": "10.10.3.113"}}]
+
+    // RAPIDJSON: Uses SizeType instead of size_t.
+    const rapidjson::Value& dpid = response[tmp_meter.dpid_.c_str()];
+    for (rapidjson::SizeType i = 0; i < dpid.Size(); ++i) {
+      // First, see if there's a meter id.
+      if (!dpid[i].HasMember(kNameMeterID) || 
+          !dpid[i][kNameMeterID].IsNumber()) {
+        logger.Log(LOG_INFO, "analyzer_process_response(): "
+                   "No %s in JSON from %s: %s",
+                   kNameMeterID, peer->hostname().c_str(), msg_body.c_str());
+        continue;
+      }
+
+      // If we made it here, we have a meter id, so let's get any
+      // other metrics wer're concerned with.
+
+      tmp_meter.meter_ = dpid[i][kNameMeterID].GetInt();
+
+      if (dpid[i].HasMember(kNameByteInCount)) {
+        // Make sure it's a number.
+        if (!dpid[i][kNameByteInCount].IsNumber()) {
+          logger.Log(LOG_WARN, "analyzer_process_response(): "
+                     "%s is not a number in JSON from %s: %s",
+                     kNameByteInCount, peer->hostname().c_str(), 
+                     msg_body.c_str());
+          continue;
+        }
+        tmp_meter.byte_in_count_ = dpid[i][kNameByteInCount].GetInt64();
+      }
+
+      if (dpid[i].HasMember(kNameBandStats)) {
+        // Make sure it's an array before processing its values.
+        const rapidjson::Value& band_stats = dpid[i][kNameBandStats];
+        if (!band_stats.IsArray()) {
+          logger.Log(LOG_WARN, "analyzer_process_response(): "
+                     "%s is not an array in JSON from %s: %s",
+                     kNameBandStats, peer->hostname().c_str(), msg_body.c_str());
+          continue;
+        }
+
+        // Grab byte_band_count.
+        for (rapidjson::SizeType j = 0; j < band_stats.Size(); ++j) {
+          if (band_stats[j].HasMember(kNameByteBandCount)) {
+            if (!band_stats[j][kNameByteBandCount].IsNumber()) {
+              logger.Log(LOG_WARN, "analyzer_process_response(): "
+                         "%s is not a numbrer in JSON from %s: %s",
+                         kNameByteBandCount, peer->hostname().c_str(),
+                         msg_body.c_str());
+              continue;
+            }
+            tmp_meter.byte_band_count_ = 
+                (uint64_t)band_stats[j][kNameByteBandCount].GetInt64();
+          }
+        }
+      }  // if (dpid[i].HasMember(kNameBandStats)) {
+
+      if (dpid[i].HasMember(kNameBands)) {
+        // Make sure it's an array before processing its values.
+        const rapidjson::Value& bands = dpid[i][kNameBands];
+        if (!bands.IsArray()) {
+          logger.Log(LOG_WARN, "analyzer_process_response(): "
+                     "%s is not an array in JSON from %s: %s",
+                     kNameBands, peer->hostname().c_str(), msg_body.c_str());
+          continue;
+        }
+
+        // Grab rate.
+        for (rapidjson::SizeType j = 0; j < bands.Size(); ++j) {
+          if (bands[j].HasMember(kNameRate)) {
+            if (!bands[j][kNameRate].IsNumber()) {
+              logger.Log(LOG_WARN, "analyzer_process_response(): "
+                         "%s is not a numbrer in JSON from %s: %s",
+                         kNameRate, peer->hostname().c_str(),
+                         msg_body.c_str());
+              continue;
+            }
+            tmp_meter.rate_ = (uint64_t)bands[j][kNameRate].GetInt64();
+          }
+        }
+      }  // if (dpid[i].HasMember(kNameBands)) {
+
+      // Now, see if we add this meter to our sdn_state, or simply update it.
+#if DEBUG_MUTEX_LOCK
+      warnx("analyzer_process_response(): requesting sdn_state lock.");
+#endif
+      pthread_mutex_lock(sdn_state_mtx);
+
+      list<MeterInfo>::iterator sdn_state_itr = sdn_state->begin();
+      while (sdn_state_itr != sdn_state->end()) {
+        if (!tmp_meter.dpid_.compare(sdn_state_itr->dpid_) 
+            && tmp_meter.meter_ == sdn_state_itr->meter_)
+          break;  // found our meter
+        sdn_state_itr++;
+      }
+      if (sdn_state_itr == sdn_state->end()) {
+        // Add new entry to our SDN state.
+        tmp_meter.time_ = time(NULL);
+        sdn_state->push_back(tmp_meter);
+        logger.Log(LOG_NOTICE, "Added new meter %d from %d, bytes in: %d",
+                   tmp_meter.meter_, tmp_meter.dpid_.c_str(),
+                   tmp_meter.byte_in_count_);
+      } else {
+        // Update our SDN state.
+        sdn_state_itr->rate_ = tmp_meter.rate_;
+        sdn_state_itr->prev_time_ = sdn_state_itr->time_;
+        sdn_state_itr->prev_byte_band_count_ = sdn_state_itr->byte_band_count_;
+        sdn_state_itr->prev_byte_in_count_ = sdn_state_itr->byte_in_count_;
+        sdn_state_itr->time_ = time(NULL);
+        sdn_state_itr->byte_band_count_ = tmp_meter.byte_band_count_;
+        sdn_state_itr->byte_in_count_ = tmp_meter.byte_in_count_;
+        int throughput = 
+            ((int)(sdn_state_itr->byte_in_count_ - 
+                   sdn_state_itr->prev_byte_in_count_) /
+             (int)(sdn_state_itr->time_ - sdn_state_itr->prev_time_));
+        logger.Log(LOG_NOTICE, "Updated meter %d from %d, throughput: %d",
+                   tmp_meter.meter_, tmp_meter.dpid_.c_str(),
+                   throughput);
+      }  // else if (sdn_state_itr != sdn_state->end()) {
+#if DEBUG_MUTEX_LOCK
+      warnx("analyzer_process_response(): releasing sdn_state lock.");
+#endif
+      pthread_mutex_unlock(sdn_state_mtx);
+
+      tmp_meter.clear();
+    }  // for (rapidjson::SizeType i = 0; i < dpid.Size(); ++i) {
+
+#if 0
+    {
+      error.Init(EX_DATAERR, "conga_process_response(): unknown JSON: %s", 
+                 msg_body.c_str());
+      return;
+    }
+#endif
+
+  } else if (msg_hdr.http_hdr().status_code() == 201 ||
+             msg_hdr.http_hdr().status_code() == 202 ||
+             msg_hdr.http_hdr().status_code() == 204) {
+    logger.Log(LOG_NOTICE, 
+               "Received RESPONSE \'%d %s\' from %s for REQUEST: %s.", 
+               msg_hdr.http_hdr().status_code(), 
+               status_code_phrase(msg_hdr.http_hdr().status_code()),
+               peer->TCPConn::print().c_str(), 
+               req_hdr->http_hdr().print_start_line(false).c_str());
+  } else {  // if (msg_hdr.http_hdr().status_code() == 200) {
     if (msg_body.size() > 0)
       logger.Log(LOG_NOTICE, 
-                 "Received ERROR response \'%d %s\' from %s for REQUEST: %s: %s.",
+                 "Received ERROR response \'%d %s\' from %s "
+                 "for REQUEST: %s: %s.",
                  msg_hdr.http_hdr().status_code(), 
                  status_code_phrase(msg_hdr.http_hdr().status_code()),
                  peer->TCPConn::print().c_str(),
-                 req_hdr->http_hdr().print_hdr(0).c_str(),
+                 req_hdr->http_hdr().print_hdr(0, false).c_str(),
                  msg_body.c_str());
     else
       logger.Log(LOG_NOTICE, 
@@ -496,13 +737,9 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                  msg_hdr.http_hdr().status_code(), 
                  status_code_phrase(msg_hdr.http_hdr().status_code()),
                  peer->TCPConn::print().c_str(),
-                 req_hdr->http_hdr().print_hdr(0).c_str());
+                 req_hdr->http_hdr().print_hdr(0, false).c_str());
   }
-
-  // TOOD(aka) should be a check in TIMEOUT or a flag passed to this routine!
-  exit(EXIT_SUCCESS);  // for now, just exit; 
 }
-
 
 // Process requests based on RESTful API.
 
@@ -512,7 +749,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
                                SSLContext* ssl_context,
                                list<AuthInfo>* api_keys, 
                                pthread_mutex_t* api_keys_mtx,
-                               list<SSLSession>::iterator peer) {
+                               list<TCPSession>::iterator peer) {
   URL url = http_hdr.uri();
 
   // Parse JSON message-body.
@@ -568,7 +805,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
 
   // Setup SSL connection.
   const string auth_db_host = "dirsdev.psc.edu";
-  SSLSession tmp_session(MsgHdr::TYPE_HTTP);
+  TCPSession tmp_session(MsgHdr::TYPE_HTTP);
   tmp_session.Init();  // set aside buffer space
   tmp_session.SSLConn::Init(auth_db_host.c_str(), AF_INET, 
                             IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
@@ -610,12 +847,12 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
   mime_msg_hdr.field_value = auth_db_host;
   auth_http_hdr.AppendMsgHdr(mime_msg_hdr);
 
-  logger.Log(LOG_DEBUG, "conga_process_post_auth(): Generated HTTP headers:\n%s", auth_http_hdr.print_hdr(0).c_str());
+  logger.Log(LOG_DEBUG, "conga_process_post_auth(): Generated HTTP headers:\n%s", auth_http_hdr.print_hdr(0, false).c_str());
 
   MsgHdr tmp_msg_hdr(MsgHdr::TYPE_HTTP);
   tmp_msg_hdr.Init(++msg_id_hash, auth_http_hdr);
-  tmp_session.AddMsgBuf(auth_http_hdr.print_hdr(0).c_str(),
-                        auth_http_hdr.hdr_len(), "", 0, tmp_msg_hdr);
+  tmp_session.AddMsgBuf(auth_http_hdr.print_hdr(0, false).c_str(),
+                        auth_http_hdr.hdr_len(false), "", 0, tmp_msg_hdr);
 
   // HACK: Normally, we would add our REQUEST message to our outgoing
   // TCPSession list (to_peers), and then go back to wait for
@@ -627,7 +864,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
   // auth server for a response in here.
 
   logger.Log(LOG_INFO, "Sending REQUEST: \'%s\n%s\' to %s.", 
-             auth_http_hdr.print_start_line().c_str(), 
+             auth_http_hdr.print_start_line(false).c_str(), 
              auth_http_hdr.print_msg_hdrs().c_str(), 
              tmp_session.SSLConn::print().c_str());
 
@@ -694,7 +931,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
              msg_hdr.http_hdr().status_code(), 
              status_code_phrase(msg_hdr.http_hdr().status_code()),
              tmp_session.TCPConn::print().c_str(), 
-             auth_http_hdr.print_start_line().c_str(),
+             auth_http_hdr.print_start_line(false).c_str(),
              auth_msg_body.c_str());
 
   // Parse JSON message-body.
@@ -835,7 +1072,7 @@ string conga_process_delete_auth(const ConfInfo& info,
                                  const string& msg_body, const File& msg_data,
                                  list<AuthInfo>* api_keys, 
                                  pthread_mutex_t* api_keys_mtx,
-                                 list<SSLSession>::iterator peer) {
+                                 list<TCPSession>::iterator peer) {
   URL url = http_hdr.uri();
 
   // Grab the API Key from the path (should be the last value).
@@ -914,7 +1151,7 @@ string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                               const string& msg_body, const File& msg_data,
                               list<AuthInfo>* api_keys, 
                               pthread_mutex_t* api_keys_mtx,
-                              list<SSLSession>::iterator peer) {
+                              list<TCPSession>::iterator peer) {
   URL url = http_hdr.uri();
 
   // Grab the API Key from the path (should be the last value).
@@ -1029,7 +1266,7 @@ string conga_process_post_allocations(const ConfInfo& info,
                                       pthread_mutex_t* api_keys_mtx,
                                       list<FlowInfo>* flows,
                                       pthread_mutex_t* flow_list_mtx,
-                                      list<SSLSession>::iterator peer) {
+                                      list<TCPSession>::iterator peer) {
   URL url = http_hdr.uri();
 
   // First, see if the allocation_id is specified.
@@ -1143,6 +1380,10 @@ string conga_process_post_allocations(const ConfInfo& info,
   // See if our flow resources are available ...
   logger.Log(LOG_EMERG, "conga_process_post_allocations(): XXX TODO(aka) Add code to submit request!");
 
+  //curl -X POST -d '{"match": {"dl_type": 2048, "dl_vlan": "4010", "nw_dst": "10.10.3.113"}}' http://tango.psc.edu:8080/stats/flow/1229782937975278821
+
+  exit(0);  // XXX not sure if we build our flow before or after we figure out its meter ...
+
   // Build our new flow.
   FlowInfo new_flow;
   new_flow.allocation_id_ = allocation_id;
@@ -1222,7 +1463,7 @@ string conga_process_delete_allocations(const ConfInfo& info,
                                         pthread_mutex_t* api_keys_mtx,
                                         list<FlowInfo>* flows,
                                         pthread_mutex_t* flow_list_mtx,
-                                        list<SSLSession>::iterator peer) {
+                                        list<TCPSession>::iterator peer) {
   URL url = http_hdr.uri();
 
   // Get the allocation_id the user specified in the RESTful request.
@@ -1368,7 +1609,7 @@ string conga_process_get_allocations(const ConfInfo& info,
                                      pthread_mutex_t* api_keys_mtx,
                                      list<FlowInfo>* flows,
                                      pthread_mutex_t* flow_list_mtx,
-                                     list<SSLSession>::iterator peer) {
+                                     list<TCPSession>::iterator peer) {
   URL url = http_hdr.uri();
 
   // Get the allocation_id if the user specified one in the RESTful request.
@@ -1592,13 +1833,13 @@ string conga_process_get_allocations(const ConfInfo& info,
 // This routine can set an ErrorHandler event.
 void conga_gen_http_error_response(const ConfInfo& info, 
                                    const HTTPFraming& http_hdr, 
-                                   list<SSLSession>::iterator peer) {
+                                   list<TCPSession>::iterator peer) {
   // Build ERROR message.
   string msg(1024, '\0');  // '\0' so strlen() works
   snprintf((char*)msg.c_str() + strlen(msg.c_str()),
            1024 - strlen(msg.c_str()), 
            "Unable to satisfy REQUEST \"%s\": %s",
-           http_hdr.print_start_line().c_str(), 
+           http_hdr.print_start_line(false).c_str(), 
            error.print().c_str());
   error.clear();
 
@@ -1635,7 +1876,7 @@ void conga_gen_http_error_response(const ConfInfo& info,
 
   //logger.Log(LOG_INFO, "conga_gen_http_error_response(): Generated HTTP headers:\n%s", http_hdr.print_hdr(0).c_str());
 
-  // Setup opaque MsgHdr for SSLSession, and add HTTP header to it.
+  // Setup opaque MsgHdr for TCPSession, and add HTTP header to it.
   MsgHdr ack_msg_hdr(MsgHdr::TYPE_HTTP);
   ack_msg_hdr.Init(++msg_id_hash, ack_hdr);  // HTTP has no id
   if (error.Event()) {
@@ -1643,8 +1884,8 @@ void conga_gen_http_error_response(const ConfInfo& info,
     return;
   }
 
-  // And add the message to our SSLSession queue for transmission.
-  peer->AddMsgBuf(ack_hdr.print_hdr(0).c_str(), ack_hdr.hdr_len(), 
+  // And add the message to our TCPSession queue for transmission.
+  peer->AddMsgBuf(ack_hdr.print_hdr(0, false).c_str(), ack_hdr.hdr_len(false), 
                   msg.c_str(), strlen(msg.c_str()), ack_msg_hdr);
   if (error.Event()) {
     error.AppendMsg("conga_gen_http_error_response()");
@@ -1659,7 +1900,7 @@ void conga_gen_http_error_response(const ConfInfo& info,
 
 // Routine to encapsulate (frame) the REPONSE as a standard HTTP message.
 void conga_gen_http_response(const ConfInfo& info, const HTTPFraming& http_hdr,
-                             const string msg, list<SSLSession>::iterator peer) {
+                             const string msg, list<TCPSession>::iterator peer) {
   // Setup HTTP RESPONSE message header.
   HTTPFraming ack_hdr;
   ack_hdr.InitResponse(200, HTTPFraming::CLOSE);
@@ -1684,7 +1925,7 @@ void conga_gen_http_response(const ConfInfo& info, const HTTPFraming& http_hdr,
     return;
   }
 
-  // Setup opaque MsgHdr for SSLSession, and add HTTP header to it.
+  // Setup opaque MsgHdr for TCPSession, and add HTTP header to it.
   MsgHdr ack_msg_hdr(MsgHdr::TYPE_HTTP);
   ack_msg_hdr.Init(++msg_id_hash, ack_hdr);  // HTTP has no id
   if (error.Event()) {
@@ -1692,8 +1933,8 @@ void conga_gen_http_response(const ConfInfo& info, const HTTPFraming& http_hdr,
     return;
   }
 
-  // And add the message to our SSLSession queue for transmission.
-  peer->AddMsgBuf(ack_hdr.print_hdr(0).c_str(), ack_hdr.hdr_len(), 
+  // And add the message to our TCPSession queue for transmission.
+  peer->AddMsgBuf(ack_hdr.print_hdr(0, false).c_str(), ack_hdr.hdr_len(false), 
                   msg.c_str(), ack_hdr.msg_len(), ack_msg_hdr);
   if (error.Event()) {
     error.AppendMsg("conga_gen_http_response()");
@@ -1702,7 +1943,7 @@ void conga_gen_http_response(const ConfInfo& info, const HTTPFraming& http_hdr,
 
   logger.Log(LOG_DEBUG, "conga_gen_http_response(): processed request %s; "
              "%s is waiting transmission to %s, contents: %s", 
-             http_hdr.print_start_line().c_str(), 
+             http_hdr.print_start_line(false).c_str(), 
              ack_hdr.print().c_str(), peer->print().c_str(), 
              msg.c_str());
 }
@@ -1721,7 +1962,7 @@ void conga_process_text_plain_request(const ConfInfo& info,
                                      RequestInfo* request_info) {
   URL url = http_hdr.uri();
   logger.Log(LOG_NOTICE, "Received HTTP REQUEST (%s), using function: %s.",
-             http_hdr.print_start_line().c_str(), url.path().c_str());
+             http_hdr.print_start_line(false).c_str(), url.path().c_str());
 
   // Head back to conga_process_incoming_msg() to send RESPONSE out.
 }
@@ -1737,7 +1978,7 @@ void conga_process_text_xml_request(const ConfInfo& info,
                                    RequestInfo* request_info) {
   error.Init(EX_DATAERR, "conga_process_text_plain_request(): "
              "No support for \'%s\' \'Content-Type\' yet: %s",
-             MIME_TEXT_PLAIN, http_hdr.print_hdr(0).c_str());
+             MIME_TEXT_PLAIN, http_hdr.print_hdr(0, false).c_str());
   // Deal with ERROR & NACK in conga_process_incoming_msg().
 
 #if 0
@@ -2914,7 +3155,7 @@ void conga_process_request(const ConfInfo& info, RequestInfo* request_info) {
 // RESPONSE message.
 void conga_gen_wsdl_response(const ConfInfo& info, const RequestInfo& request_info, 
                             const HTTPFraming& http_hdr, 
-                            list<SSLSession>::iterator peer) {
+                            list<TCPSession>::iterator peer) {
   error.Init(EX_SOFTWARE, "conga_gen_wsdl_response(): not supported yet");
   return;  // deal with ERROR & NACK in conga_process_incoming_msg()
 
@@ -2984,18 +3225,18 @@ void conga_gen_wsdl_response(const ConfInfo& info, const RequestInfo& request_in
     mime_msg_hdr.parameters.push_back(param);
   */
 
-  // Setup opaque MsgHdr for SSLSession, and add HTTP header to it.
+  // Setup opaque MsgHdr for TCPSession, and add HTTP header to it.
   MsgHdr ack_msg_hdr(MsgHdr::TYPE_HTTP);
   ack_msg_hdr.Init(++msg_id_hash, ack_hdr);  // HTTP has no id
 
-  // And add the message to our SSLSession queue for transmission.
-  peer->AddMsgBuf(ack_hdr.print_hdr(0).c_str(), ack_hdr.hdr_len(), 
+  // And add the message to our TCPSession queue for transmission.
+  peer->AddMsgBuf(ack_hdr.print_hdr(0, false).c_str(), ack_hdr.hdr_len(false), 
                   request_info.results_.c_str(), ack_hdr.msg_len(), ack_msg_hdr);
 
   logger.Log(LOG_DEBUG, "conga_gen_wsdl_response(): %s is waiting transmission to %s, contents: %s", ack_hdr.print().c_str(), peer->print().c_str(), request_info.results_.c_str());
 
   logger.Log(LOG_INFO, "Processed WSDL REQUEST (%s) from %s.", 
-             http_hdr.print_start_line().c_str(), 
+             http_hdr.print_start_line(false).c_str(), 
              peer->print().c_str());
 }
 #endif  // Deprecated!

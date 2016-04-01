@@ -15,9 +15,7 @@
 
 #include "ErrorHandler.h"
 #include "Logger.h"
-#include "defines.h"            // for ASCII color strings &
-                                // delimiters TOOD(aka) Is this still
-                                // needed?
+#include "defines.h"           // for XML, TODO(aka) Is this still needed?
 #include "server-funcs.h"
 
 // CONGAd
@@ -25,6 +23,11 @@
 // Static defaults.
 static const char* conf_file_default = "conga.conf";
 //static const ssize_t kDefaultBufSize = TCPSESSION_DEFAULT_BUFSIZE;
+
+static const char* kRyuControllerName = "tango.psc.edu";
+static const in_port_t kRyuControllerPort = 8080;
+static const char* kRyuQueryStats = "stats";
+static const char* kRyuQueryMeter = "meter";
 
 
 // Main utility functions.
@@ -338,3 +341,86 @@ void parse_conf_file(ConfInfo* info) {
 #endif
   }
 }
+
+// Routine to *initiate* the sending of a GET request to the RYU
+// controller for all meters' stats.
+//
+//  Note, main()'s event-loop will take care of opening the connetion
+//  and sending the data out.
+void initiate_stats_meter_request(const ConfInfo& info, const string& dpid,
+                                  list<TCPSession>* to_peers,
+                                  pthread_mutex_t* to_peers_mtx) {
+  // Setup a client connection to the Ryu controller.
+  TCPSession tmp_session(MsgHdr::TYPE_HTTP);
+  tmp_session.Init();  // set aside buffer space
+  tmp_session.SSLConn::Init(kRyuControllerName, AF_INET, 
+                            IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
+  tmp_session.set_port(kRyuControllerPort);
+  tmp_session.set_blocking();
+  tmp_session.Socket(PF_INET, SOCK_STREAM, 0, NULL);
+  //tmp_session.set_handle(tmp_session.fd());  // for now, set it to the socket
+  if (error.Event()) {
+    error.AppendMsg("initiate_stats_meterconfig_request():");
+    return;
+  }
+
+  // Build a (HTTP) framing header and load the framing header into
+  // our TCPSession's MsgHdr list.
+  //
+  // example: GET http://tango.psc.edu:8080/stats/meter/1229782937975278821
+
+  char path_buf[kURLMaxSize];
+
+  // Note, kInfluxQueryMetrics ends in "where flow='", so we must add
+  // the flow along with the suffix (i.e., ' limit 1).
+
+  snprintf(path_buf, kURLMaxSize - 1, "%s/%s/%s",
+           kRyuQueryStats, kRyuQueryMeter, dpid.c_str());
+  URL query_url;
+  query_url.Init("http", kRyuControllerName, kRyuControllerPort,
+                 path_buf, strlen(path_buf), NULL, 0, NULL);
+  HTTPFraming query_http_hdr;
+  query_http_hdr.InitRequest(HTTPFraming::GET, query_url);
+
+  // Add HTTP message-headers (for host & Accept).
+  struct rfc822_msg_hdr mime_msg_hdr;
+  mime_msg_hdr.field_name = MIME_HOST;
+  char tmp_value[kURLMaxSize];
+  snprintf(tmp_value, kURLMaxSize - 1, "%s:%hu", 
+           kRyuControllerName, kRyuControllerPort);
+  mime_msg_hdr.field_value = tmp_value;
+  query_http_hdr.AppendMsgHdr(mime_msg_hdr);
+
+#if 0  // Add Accept: */* header
+  mime_msg_hdr.field_name = MIME_ACCEPT;
+  snprintf(tmp_value, kURLMaxSize - 1, "*/*");
+  mime_msg_hdr.field_value = tmp_value;
+  query_http_hdr.AppendMsgHdr(mime_msg_hdr);
+#endif
+
+  logger.Log(LOG_DEBUG, "initiate_stats_meterconfig_request(): Generated HTTP headers:\n%s", query_http_hdr.print_hdr(0, true).c_str());
+
+  MsgHdr tmp_msg_hdr(MsgHdr::TYPE_HTTP);
+  tmp_msg_hdr.Init(++msg_id_hash, query_http_hdr);
+  tmp_session.AddMsgBuf(query_http_hdr.print_hdr(0, true).c_str(),
+                        query_http_hdr.hdr_len(true), "", 0, tmp_msg_hdr);
+  if (error.Event()) {
+    logger.Log(LOG_ERR, "initiate_stats_meterconfig_request(): "
+               "failed to build msg: %s", error.print().c_str());
+    return;
+  }
+
+#if DEBUG_MUTEX_LOCK
+  warnx("initiate_stats_meterconfig_request(): requesting to_peers lock.");
+#endif
+  pthread_mutex_lock(to_peers_mtx);
+  to_peers->push_back(tmp_session);
+#if DEBUG_MUTEX_LOCK
+  warnx("initiate_stats_meterconfig_request(): releasing to_peers lock.");
+#endif
+  pthread_mutex_unlock(to_peers_mtx);
+
+  logger.Log(LOG_NOTICE, "Initiating request to %s for meter stats on: %s.",
+             tmp_session.print_2tuple().c_str(), dpid.c_str());
+}
+

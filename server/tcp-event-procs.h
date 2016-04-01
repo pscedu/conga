@@ -13,7 +13,7 @@
 #include <list>
 using namespace std;
 
-#include "SSLSession.h"
+#include "TCPSession.h"
 #include "ConfInfo.h"
 
 // Networking definitions.
@@ -21,24 +21,24 @@ using namespace std;
 // System definitions.
 #define TCP_EVENT_MAX_FDS 256
 
-int tcp_event_poll_init(const list<SSLSession>& to_peers, 
-                        const list<SSLSession>& from_peers,
+int tcp_event_poll_init(const list<TCPSession>& to_peers, 
+                        const list<TCPSession>& from_peers,
                         const int max_fds, const int nfds, 
                         struct pollfd pollfds[]);
 int tcp_event_poll_status(struct pollfd pollfds[], int nfds, int start_index);
-list<SSLSession>::iterator 
+list<TCPSession>::iterator 
 tcp_event_poll_get_peer(const ConfInfo& info, const int fd, 
-                        list<SSLSession>* peers);
+                        list<TCPSession>* peers);
 int tcp_event_accept(const ConfInfo& info, const SSLConn& server, 
                      const int max_open_connections, const int framing,
-                     SSLContext* ssl_context, list<SSLSession>* from_peers);
-void tcp_event_read(const ConfInfo& info, list<SSLSession>::iterator peer);
-void tcp_event_write(const ConfInfo& info, list<SSLSession>::iterator peer);
+                     SSLContext* ssl_context, list<TCPSession>* from_peers);
+void tcp_event_read(const ConfInfo& info, list<TCPSession>::iterator peer);
+void tcp_event_write(const ConfInfo& info, list<TCPSession>::iterator peer);
 
-list<SSLSession>::iterator 
+list<TCPSession>::iterator 
 tcp_event_synchronize_connection(const bool receiver_initiated_flag, 
-                                 ConfInfo* info, list<SSLSession>* to_peers, 
-                                 list<SSLSession>* from_peers,
-                                 list<SSLSession>::iterator peer);
+                                 ConfInfo* info, list<TCPSession>* to_peers, 
+                                 list<TCPSession>* from_peers,
+                                 list<TCPSession>::iterator peer);
 
 #endif  /* #ifndef TCP_EVENT_PROCS_H_ */

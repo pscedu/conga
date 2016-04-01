@@ -25,12 +25,12 @@ INCLUDES = -I../ip-utils ${RAPIDJSON_INCLUDES}
 #INCLUDES = -I../ip-utils ${XERCES_INCLUDES} ${MYSQL_INCLUDES}
 LDFLAGS = -Wl,-rpath /usr/local/lib
 #LDFLAGS = ${XERCES_LDFLAGS} -Wl,-rpath /usr/local/lib
-LIBS =  -lpthread -lssl
+LIBS =  -lssl -lcrypto -lpthread
 #LIBS =  ${MYSQL_LDFLAGS} ${XERCES_LIBS} -lpthread -lgomp
 CXXOPTIM =
 CXXPATH =
 
-OBJS = FlowInfo.o ssl-event-procs.o conga-procs.o server-funcs.o
+OBJS = SwitchInfo.o MeterInfo.o FlowInfo.o tcp-event-procs.o conga-procs.o server-funcs.o
 
 all: conga
 

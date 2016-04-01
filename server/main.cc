@@ -25,10 +25,11 @@ using namespace std;
 #include "ErrorHandler.h"
 #include "Logger.h"
 #include "ConfInfo.h"
+#include "SwitchInfo.h"
 #include "SSLContext.h"
 #include "SSLConn.h"
-#include "SSLSession.h"
-#include "ssl-event-procs.h"
+#include "TCPSession.h"
+#include "tcp-event-procs.h"
 #include "conga-procs.h"
 #include "server-funcs.h"
 
@@ -52,14 +53,18 @@ const in_port_t kServerPort = CONGA_SERVER_PORT;
 
 int main(int argc, char* argv[]) {
   ConfInfo conf_info;           // configuration information
+  map<string, SwitchInfo> switches;  // hard-coded info regarding SDN
+                                     // switches hashed by DPID
+  list<MeterInfo> sdn_state;   // current knowlege of SDN flows
+  pthread_mutex_t sdn_state_mtx;
   list<AuthInfo> api_keys;      // credentials currently active
   pthread_mutex_t api_keys_mtx;
   list<FlowInfo> flows;         // flows currently active (indexed by AuthInfo)
   pthread_mutex_t flow_list_mtx;
-  list<SSLSession> to_peers;    // initated connections (to other nodes)
+  list<TCPSession> to_peers;    // initated connections (to other nodes)
   //pthread_mutex_t to_peers_mtx = PTHREAD_MUTEX_INITIALIZER;
   pthread_mutex_t to_peers_mtx;
-  list<SSLSession> from_peers;  // received connections (from accept(2))
+  list<TCPSession> from_peers;  // received connections (from accept(2))
   //pthread_mutex_t from_peers_mtx = PTHREAD_MUTEX_INITIALIZER;
   pthread_mutex_t from_peers_mtx;
   vector<pthread_t> thread_list;  // list to keep track of all threads
@@ -122,6 +127,26 @@ int main(int argc, char* argv[]) {
   // Load configuration file (for additional user set-able globals).
   parse_conf_file(&conf_info);
 
+  SwitchInfo tmp_switch;
+  list<string> end_hosts;  // iterator constructor hack
+  char const* mi_ptr[] = {"10.10.1.10", "10.10.1.20", "10.10.1.30" };
+  list<string> mi_hosts(mi_ptr, mi_ptr + sizeof(mi_ptr) / sizeof(*mi_ptr));
+  tmp_switch.Init("MI_dpid", "PSC", "tango.psc.edu", 2048, 4050, 4010,
+                  mi_hosts);
+  switches.insert(std::make_pair("1229782937975278821", tmp_switch));
+  tmp_switch.clear();
+  char const* wec_ptr[] = {"10.10.2.10", "10.10.2.30", "10.10.2.50" };
+  list<string> wec_hosts(wec_ptr, wec_ptr + sizeof(wec_ptr) / sizeof(*wec_ptr));
+  tmp_switch.Init("WEC_dpid", "PSC", "tango.psc.edu", 2048, 4050, 4010,
+                  wec_hosts);
+  switches.insert(std::make_pair("15730199386661060610", tmp_switch));
+  tmp_switch.clear();
+  char const* nics_ptr[] = {"10.10.3.111", "10.10.3.112", "10.10.3.113", "10.10.3.114" };
+  list<string> nics_hosts(nics_ptr, nics_ptr + sizeof(nics_ptr) / sizeof(*nics_ptr));
+  tmp_switch.Init("1_dpid", "NICS", "tango.psc.edu", 2048, 399, -1,
+                  nics_hosts);
+  switches.insert(std::make_pair("281646654550181", tmp_switch));
+
   //logger.Log(LOG_DEBUGGING, "main(): .", );
 
   // Make sure we've got all the *key* information that we need.
@@ -142,7 +167,7 @@ int main(int argc, char* argv[]) {
                      "limbo.psc.edu.key.pem", "/etc/ssl/private",
                      SSL_FILETYPE_PEM, NULL, 
                      "limbo.psc.edu.crt.pem", "/etc/ssl/certs",
-                     SSL_FILETYPE_PEM, 
+                     SSL_FILETYPE_PEM, NULL, NULL, 
                      SSL_VERIFY_NONE, 2, SSL_SESS_CACHE_OFF,
                      SSL_OP_CIPHER_SERVER_PREFERENCE);
   else
@@ -150,7 +175,7 @@ int main(int argc, char* argv[]) {
                      "limbo.psc.edu.key.pem", "/home/pscnoc/conga/certs",
                      SSL_FILETYPE_PEM, NULL, 
                      "limbo.psc.edu.crt.pem", "/home/pscnoc/conga/certs",
-                     SSL_FILETYPE_PEM, 
+                     SSL_FILETYPE_PEM, NULL, NULL,
                      SSL_VERIFY_NONE, 2, SSL_SESS_CACHE_OFF,
                      SSL_OP_CIPHER_SERVER_PREFERENCE);
 #if 0  // XXX Additional ssl context suff that should be in Init()
@@ -201,7 +226,8 @@ int main(int argc, char* argv[]) {
     servers.push_back(tmp_server);  // no need to grab MUTEX, as not MT yet
   }
 
-  logger.Log(LOG_NOTICE, "conga (%s) starting on port %hu.", SERVER_VERSION, conf_info.port_);
+  logger.Log(LOG_NOTICE, "conga (%s) starting on port %hu.", 
+             SERVER_VERSION, conf_info.port_);
 
   // Daemonize program.
   if (getuid() == 0) {
@@ -226,10 +252,36 @@ int main(int argc, char* argv[]) {
 #endif
 
   // Any work prior to the main event loop?
+
+  // Initiate meter state requests ...
   time_t state_poll_timeout = time(NULL);
+  map<string, SwitchInfo>::iterator switch_itr = switches.begin();
+  while (switch_itr != switches.end()) {
+#if 0  // For Debugging: end_hosts check
+    list<string> end_hosts = switch_itr->second.end_hosts();
+    list<string>::iterator host_itr = end_hosts.begin();
+    while (host_itr != end_hosts.end()) {
+      printf("XXX Testing end_hosts: %s\n", host_itr->c_str());
+      host_itr++;
+    }
+#endif
+
+    initiate_stats_meter_request(conf_info, switch_itr->first, &to_peers,
+                                 &to_peers_mtx);
+
+    // And while we're at it, issue the onetime request for the
+    // meters' maximum rates.
+    /*
+    initiate_stats_meterconfig_request(info, 
+                                       switch_itr->first, switch_itr->second,
+                                       &ssl_context, &to_peers, &to_peers_mtx);
+    */
+    //curl -X GET http://tango.psc.edu:8080/stats/meterconfig/1229782937975278821
+    switch_itr++;
+  }
 
   // Main event-loop.
-  struct pollfd pollfds[SSL_EVENT_MAX_FDS];
+  struct pollfd pollfds[TCP_EVENT_MAX_FDS];
   int nfds;             // num file descriptors to poll on
   int timeout = 1000;	// in milliseconds
   int n;                // poll return value
@@ -250,7 +302,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Load any fds from any *active* peers.
-    nfds = ssl_event_poll_init(to_peers, from_peers, SSL_EVENT_MAX_FDS, 
+    nfds = tcp_event_poll_init(to_peers, from_peers, TCP_EVENT_MAX_FDS, 
                                nfds, pollfds);
 		
     // Check the fds with poll(2) (or select()).
@@ -291,7 +343,7 @@ int main(int argc, char* argv[]) {
         if (state_poll_timeout <= now) {
 #if 0
           const string ryu_host = "ryu.psc.edu";
-          SSLSession tmp_session(MsgInfo::HTTP);
+          TCPSession tmp_session(MsgInfo::HTTP);
           tmp_session.Init();  // set aside buffer space
           tmp_session.SSLConn::Init(ryu_host.c_str(), AF_INET, 
                                     IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
@@ -309,7 +361,7 @@ int main(int argc, char* argv[]) {
           }
 
           // Build a (HTTP) framing header and load the framing header into
-          // our SSLSession's MsgHdr list.
+          // our TCPSession's MsgHdr list.
 
           URL ryu_url;
           ryu_url.Init("https", ryu_host.c_str(), 443, NULL, 0, NULL);
@@ -358,13 +410,13 @@ int main(int argc, char* argv[]) {
 #endif
         pthread_mutex_lock(&from_peers_mtx);  // TODO(aka) what if not threaded?
 
-        list<SSLSession>::iterator from_peer = from_peers.begin();
+        list<TCPSession>::iterator from_peer = from_peers.begin();
         while (from_peer != from_peers.end()) {
           // If it's an entire message (according to the headers), process it.
           if (from_peer->IsIncomingMsgComplete()) {
             if (from_peer->IsSynchroniationEnabled()) {
               // Note, synchronization makes sure the initiator of a
-              // SSLSession uses to_peers, while the receiver uses
+              // TCPSession uses to_peers, while the receiver uses
               // from_peers for the session.  Since (i) HTTP framing
               // doesn't need this, and (ii) we'd need to lock
               // to_peers, as well, we're making it a ERROR in here.
@@ -373,7 +425,7 @@ int main(int argc, char* argv[]) {
               // TOOD(aka) Remove lamport_ from ConfInfo, then we
               // don't need to pass ConfInfo as a ptr!
 
-              ssl_event_synchronize_connection(true, &conf_info, &to_peers,
+              tcp_event_synchronize_connection(true, &conf_info, &to_peers,
               &from_peers, from_peer);
               */
               logger.Log(LOG_ERR, "main(): "
@@ -392,7 +444,8 @@ int main(int argc, char* argv[]) {
                 !from_peer->IsIncomingMsgBeingProcessed()) {
               // Build struct for function arguments.
               struct conga_incoming_msg_args args = {
-                &conf_info, &ssl_context, &api_keys, &api_keys_mtx, 
+                &conf_info, &ssl_context, &sdn_state, &sdn_state_mtx,
+                &api_keys, &api_keys_mtx, 
                 &flows, &flow_list_mtx,
                 &to_peers, &to_peers_mtx, from_peer, from_peers.end(), 
                 &thread_list, &thread_list_mtx,
@@ -412,6 +465,7 @@ int main(int argc, char* argv[]) {
             } else if (!conf_info.multi_threaded_) {
               // Process message single threaded.
               conga_process_incoming_msg(&conf_info, &ssl_context,
+                                         &sdn_state, &sdn_state_mtx,
                                          &api_keys, &api_keys_mtx, 
                                          &flows, &flow_list_mtx,
                                          &to_peers, &to_peers_mtx, from_peer);
@@ -528,13 +582,13 @@ int main(int argc, char* argv[]) {
         warnx("main(timeout): requesting to_peers lock.");
 #endif
         pthread_mutex_lock(&to_peers_mtx);
-        list<SSLSession>::iterator to_peer = to_peers.begin();
+        list<TCPSession>::iterator to_peer = to_peers.begin();
         while (to_peer != to_peers.end()) {
           // If it's an entire message (according to the headers), process it.
           if (to_peer->IsIncomingMsgComplete()) {
             if (to_peer->IsSynchroniationEnabled()) {
               // Note, synchronization makes sure the initiator of
-              // a SSLSession uses to_peers, while the receiver uses
+              // a TCPSession uses to_peers, while the receiver uses
               // from_peers for the session.  Since (i) HTTP framing
               // doesn't need this, and (ii) we'd need to lock
               // to_peers, as well, we're making it a ERROR in here.
@@ -543,7 +597,7 @@ int main(int argc, char* argv[]) {
               // TOOD(aka) Remove lamport_ from ConfInfo, then we
               // don't need to pass ConfInfo as a ptr!
 
-              ssl_event_synchronize_connection(true, &conf_info, &to_peers,
+              tcp_event_synchronize_connection(true, &conf_info, &to_peers,
               &from_peers, from_peer);
               */
               logger.Log(LOG_ERR, "main(): "
@@ -565,9 +619,10 @@ int main(int argc, char* argv[]) {
 
             // Process message single threaded.
             conga_process_incoming_msg(&conf_info, &ssl_context,
+                                       &sdn_state, &sdn_state_mtx,
                                        &api_keys, &api_keys_mtx, 
                                        &flows, &flow_list_mtx,
-                                       &to_peers, &to_peers_mtx, from_peer);
+                                       &to_peers, &to_peers_mtx, to_peer);
             if (error.Event()) {
               // Note, if we reached here, then we could not NACK the
               // error we encountered processing the message in
@@ -708,9 +763,9 @@ int main(int argc, char* argv[]) {
           pthread_mutex_lock(&from_peers_mtx);
 
           // As we haven't added anything to from_peers yet, we handle
-          // all errors internally in ssl_event_accept().
+          // all errors internally in tcp_event_accept().
 
-          ssl_event_accept(conf_info, servers[j], kMaxPeers, kFramingType,
+          tcp_event_accept(conf_info, servers[j], kMaxPeers, kFramingType,
                            &ssl_context, &from_peers);
 #if DEBUG_MUTEX_LOCK
           warnx("main(listen): releasing from_peers lock.");
@@ -747,8 +802,8 @@ int main(int argc, char* argv[]) {
       //logger.Log(LOG_INFO, "main(event): Processing event %d, total left: %d.", i, n);
 
       int tmp_i = i;  // For Debugging ...
-      if ((i = ssl_event_poll_status(pollfds, nfds, i)) < 0) {
-        logger.Log(LOG_ERROR, "ssl_event_poll_status() failed, "
+      if ((i = tcp_event_poll_status(pollfds, nfds, i)) < 0) {
+        logger.Log(LOG_ERROR, "tcp_event_poll_status() failed, "
                    "nfds = %d, i = %d, prev i = %d, n = %d.", 
                    nfds, i, tmp_i, n);
         break;
@@ -762,12 +817,12 @@ int main(int argc, char* argv[]) {
           warnx("main(POLLIN): requesting to_peers lock.");
 #endif
           pthread_mutex_lock(&to_peers_mtx);
-          list<SSLSession>::iterator peer =
-              ssl_event_poll_get_peer(conf_info, pollfds[i].fd, &to_peers);
+          list<TCPSession>::iterator peer =
+              tcp_event_poll_get_peer(conf_info, pollfds[i].fd, &to_peers);
           if (peer != to_peers.end()) {
             // Slurp up the waiting data, and initialize (if not yet).
-            ssl_event_read(conf_info, peer);
-            // ssl_event_read(conf_info, &(*peer));  // note, iterator hack
+            tcp_event_read(conf_info, peer);
+            // tcp_event_read(conf_info, &(*peer));  // note, iterator hack
 
             if (!peer->IsIncomingMsgInitialized()) {
               peer->InitIncomingMsg();
@@ -806,7 +861,7 @@ int main(int argc, char* argv[]) {
 #endif
             pthread_mutex_lock(&from_peers_mtx);
             peer = 
-                ssl_event_poll_get_peer(conf_info, pollfds[i].fd, &from_peers);
+                tcp_event_poll_get_peer(conf_info, pollfds[i].fd, &from_peers);
             if (peer == from_peers.end()) {
               logger.Log(LOG_ERR, "main(POLLIN): "
                          "Unable to find peer for file descriptor: %d",
@@ -814,8 +869,8 @@ int main(int argc, char* argv[]) {
               // Fall-through to continue processing pollfds[] vector.
             } else {  // if (peer == from_peers.end()) {
               // Slurp up the waiting data, and initialize (if not yet).
-              ssl_event_read(conf_info, peer);
-              // ssl_event_read(conf_info, &(*peer));  // note, iterator hack
+              tcp_event_read(conf_info, peer);
+              // tcp_event_read(conf_info, &(*peer));  // note, iterator hack
 
               if (!peer->IsIncomingMsgInitialized())
                 peer->InitIncomingMsg();
@@ -853,11 +908,11 @@ int main(int argc, char* argv[]) {
           warnx("main(POLLOUT): requesting to_peers lock.");
 #endif
           pthread_mutex_lock(&to_peers_mtx);
-          list<SSLSession>::iterator peer =
-              ssl_event_poll_get_peer(conf_info, pollfds[i].fd, &to_peers);
+          list<TCPSession>::iterator peer =
+              tcp_event_poll_get_peer(conf_info, pollfds[i].fd, &to_peers);
           if (peer != to_peers.end()) {
             // Write a chunk of data out the waiting socket.
-            ssl_event_write(conf_info, peer);
+            tcp_event_write(conf_info, peer);
             if (error.Event()) {
               logger.Log(LOG_ERR, "main(POLLOUT): "
                          "Unable to write data to %s: %s.",
@@ -895,7 +950,7 @@ int main(int argc, char* argv[]) {
 #endif
             pthread_mutex_lock(&from_peers_mtx);
             peer = 
-                ssl_event_poll_get_peer(conf_info, pollfds[i].fd, &from_peers);
+                tcp_event_poll_get_peer(conf_info, pollfds[i].fd, &from_peers);
             if (peer == from_peers.end()) {
               logger.Log(LOG_ERR, "main(POLLOUT): "
                          "Unable to find peer for file descriptor: %d",
@@ -903,7 +958,7 @@ int main(int argc, char* argv[]) {
               // Fall-through to continue processing pollfds[] vector.
             } else {  // if (peer == from_peers.end()) {
               // Write a chunk of data out the waiting socket.
-              ssl_event_write(conf_info, peer);
+              tcp_event_write(conf_info, peer);
               if (error.Event()) {
                 logger.Log(LOG_ERR, "main(POLLOUT): "
                            "Unable to write data to %s: %s.",
@@ -942,8 +997,8 @@ int main(int argc, char* argv[]) {
           warnx("main(): requesting to_peers lock.");
 #endif
           pthread_mutex_lock(&to_peers_mtx);
-          list<SSLSession>::iterator peer =
-              ssl_event_poll_get_peer(conf_info, pollfds[i].fd, &to_peers);
+          list<TCPSession>::iterator peer =
+              tcp_event_poll_get_peer(conf_info, pollfds[i].fd, &to_peers);
           if (peer != to_peers.end()) {
             // Report the error and remove the peer.
             logger.Log(LOG_ERR, "main(): "
@@ -971,7 +1026,7 @@ int main(int argc, char* argv[]) {
 #endif
             pthread_mutex_lock(&from_peers_mtx);
             peer = 
-                ssl_event_poll_get_peer(conf_info, pollfds[i].fd, &from_peers);
+                tcp_event_poll_get_peer(conf_info, pollfds[i].fd, &from_peers);
             if (peer == from_peers.end()) {
               logger.Log(LOG_ERR, "main(): "
                          "Unable to find peer for file descriptor: %d",
@@ -1003,8 +1058,8 @@ int main(int argc, char* argv[]) {
           warnx("main(): requesting to_peers lock.");
 #endif
           pthread_mutex_lock(&to_peers_mtx);
-          list<SSLSession>::iterator peer =
-              ssl_event_poll_get_peer(conf_info, pollfds[i].fd, &to_peers);
+          list<TCPSession>::iterator peer =
+              tcp_event_poll_get_peer(conf_info, pollfds[i].fd, &to_peers);
           if (peer != to_peers.end()) {
             // If peer is still connected, report the genuine error.
             if (peer->IsConnected()) {
@@ -1034,7 +1089,7 @@ int main(int argc, char* argv[]) {
 #endif
             pthread_mutex_lock(&from_peers_mtx);
             peer = 
-                ssl_event_poll_get_peer(conf_info, pollfds[i].fd, &from_peers);
+                tcp_event_poll_get_peer(conf_info, pollfds[i].fd, &from_peers);
             if (peer == from_peers.end()) {
               logger.Log(LOG_ERR, "main(): "
                          "Unable to find peer for file descriptor: %d",
@@ -1069,8 +1124,8 @@ int main(int argc, char* argv[]) {
           warnx("main(): requesting to_peers lock.");
 #endif
           pthread_mutex_lock(&to_peers_mtx);
-          list<SSLSession>::iterator peer =
-              ssl_event_poll_get_peer(conf_info, pollfds[i].fd, &to_peers);
+          list<TCPSession>::iterator peer =
+              tcp_event_poll_get_peer(conf_info, pollfds[i].fd, &to_peers);
           if (peer != to_peers.end()) {
             // Report the error and remove the peer.
             logger.Log(LOG_ERR, "main(): "
@@ -1098,7 +1153,7 @@ int main(int argc, char* argv[]) {
 #endif
             pthread_mutex_lock(&from_peers_mtx);
             peer = 
-                ssl_event_poll_get_peer(conf_info, pollfds[i].fd, &from_peers);
+                tcp_event_poll_get_peer(conf_info, pollfds[i].fd, &from_peers);
             if (peer == from_peers.end()) {
               logger.Log(LOG_ERR, "main(): "
                          "Unable to find peer for file descriptor: %d",

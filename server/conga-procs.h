@@ -15,8 +15,9 @@
 #include <list>
 using namespace std;
 
-#include "SSLSession.h"
+#include "TCPSession.h"
 #include "ConfInfo.h"
+#include "MeterInfo.h"
 #include "AuthInfo.h"
 #include "FlowInfo.h"
 
@@ -25,14 +26,17 @@ using namespace std;
 struct conga_incoming_msg_args {
   ConfInfo* info;
   SSLContext* ssl_context;
+  //const string& dpid;
+  list<MeterInfo>* sdn_state;
+  pthread_mutex_t* sdn_state_mtx;
   list<AuthInfo>* api_keys;
   pthread_mutex_t* api_keys_mtx;
   list<FlowInfo>* flows;
   pthread_mutex_t* flow_list_mtx;
-  list<SSLSession>* to_peers;
+  list<TCPSession>* to_peers;
   pthread_mutex_t* to_peers_mtx;
-  list<SSLSession>::iterator peer;
-  list<SSLSession>::iterator peer_end;
+  list<TCPSession>::iterator peer;
+  list<TCPSession>::iterator peer_end;
   vector<pthread_t>* thread_list;
   pthread_mutex_t* thread_list_mtx;
 };
@@ -40,35 +44,41 @@ struct conga_incoming_msg_args {
 const char kCONGAMsgDelimiter = ':';
 
 bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context, 
+                                //const string& dpid,
+                                list<MeterInfo>* sdn_state,
+                                pthread_mutex_t* sdn_state_mtx,
                                 list<AuthInfo>* api_keys, 
                                 pthread_mutex_t* api_keys_mtx,
                                 list<FlowInfo>* flows, 
                                 pthread_mutex_t* flow_list_mtx,
-                                list<SSLSession>* to_peers,
+                                list<TCPSession>* to_peers,
                                 pthread_mutex_t* to_peers_mtx, 
-                                list<SSLSession>::iterator peer);
+                                list<TCPSession>::iterator peer);
 void* conga_concurrent_process_incoming_msg(void* args);
 void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                             const string& msg_body, const File& msg_data,
-                            list<SSLSession>::iterator peer, 
+                            //XXX const string& dpid,
+                            list<MeterInfo>* sdn_state,
+                            pthread_mutex_t* sdn_state_mtx,
+                            list<TCPSession>::iterator peer, 
                             list<MsgHdr>::iterator req_hdr);
 string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                                const string& msg_body, const File& msg_data,
                                SSLContext* ssl_context, 
                                list<AuthInfo>* api_keys, 
                                pthread_mutex_t* api_keys_mtx,
-                               list<SSLSession>::iterator peer);
+                               list<TCPSession>::iterator peer);
 string conga_process_delete_auth(const ConfInfo& info,
                                  const HTTPFraming& http_hdr,
                                  const string& msg_body, const File& msg_data,
                                  list<AuthInfo>* api_keys, 
                                  pthread_mutex_t* api_keys_mtx,
-                                 list<SSLSession>::iterator peer);
+                                 list<TCPSession>::iterator peer);
 string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                               const string& msg_body, const File& msg_data,
                               list<AuthInfo>* api_keys, 
                               pthread_mutex_t* api_keys_mtx,
-                              list<SSLSession>::iterator peer);
+                              list<TCPSession>::iterator peer);
 string conga_process_post_allocations(const ConfInfo& info,
                                       const HTTPFraming& http_hdr,
                                       const string& msg_body,
@@ -77,7 +87,7 @@ string conga_process_post_allocations(const ConfInfo& info,
                                       pthread_mutex_t* api_keys_mtx,
                                       list<FlowInfo>* flows,
                                       pthread_mutex_t* flow_list_mtx,
-                                      list<SSLSession>::iterator peer);
+                                      list<TCPSession>::iterator peer);
 string conga_process_delete_allocations(const ConfInfo& info, 
                                         const HTTPFraming& http_hdr,
                                         const string& msg_body,
@@ -86,7 +96,7 @@ string conga_process_delete_allocations(const ConfInfo& info,
                                         pthread_mutex_t* api_keys_mtx,
                                         list<FlowInfo>* flows,
                                         pthread_mutex_t* flow_list_mtx,
-                                        list<SSLSession>::iterator peer);
+                                        list<TCPSession>::iterator peer);
 string conga_process_get_allocations(const ConfInfo& info, 
                                      const HTTPFraming& http_hdr,
                                      const string& msg_body,
@@ -95,14 +105,14 @@ string conga_process_get_allocations(const ConfInfo& info,
                                      pthread_mutex_t* api_keys_mtx,
                                      list<FlowInfo>* flows,
                                      pthread_mutex_t* flow_list_mtx,
-                                     list<SSLSession>::iterator peer);
+                                     list<TCPSession>::iterator peer);
 
 void conga_gen_http_error_response(const ConfInfo& info,
                                    const HTTPFraming& http_hdr, 
-                                   list<SSLSession>::iterator peer);
+                                   list<TCPSession>::iterator peer);
 void conga_gen_http_response(const ConfInfo& info,
                              const HTTPFraming& http_hdr, const string msg,
-                             list<SSLSession>::iterator peer);
+                             list<TCPSession>::iterator peer);
 
 #if 0  // Deprecated.
 void conga_process_text_plain_request(const ConfInfo& info, 
@@ -119,7 +129,7 @@ void conga_process_request(const ConfInfo& info,
                           RequestInfo* meta_data);  // ErrorHandler
 void conga_gen_wsdl_response(const ConfInfo& info, const RequestInfo& meta_data, 
                             const HTTPFraming& http_hdr, 
-                            list<SSLSession>::iterator peer);
+                            list<TCPSession>::iterator peer);
 #endif
 
 #endif  /* #ifndef CONGA_PROCS_H_ */

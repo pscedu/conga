@@ -32,22 +32,22 @@ const int kReceiverInitiated = 1;
 
 // Main event-loop functions.
 
-// This poll(3)-based routine loads any SSLSession *active* file
+// This poll(3)-based routine loads any TCPSession *active* file
 // descriptors into the *read* ready mask.  If the active fd *also*
 // has data pending it its write buffer, then we add that fd to the
 // "write" ready mask as well.  We return the number of fds loaded.
-int tcp_event_poll_init(const list<SSLSession>& to_peers, 
-                        const list<SSLSession>& from_peers,
+int tcp_event_poll_init(const list<TCPSession>& to_peers, 
+                        const list<TCPSession>& from_peers,
                         const int max_fds, const int nfds, 
                         struct pollfd pollfds[]) {
   if (! to_peers.size() && ! from_peers.size())
     return nfds;  // nfsd could already have the server's listen socket
 
-  // Walk first list checking SSLSession objects for an *open* file
+  // Walk first list checking TCPSession objects for an *open* file
   // descriptor ...
 
   int i = nfds;
-  list<SSLSession>::const_iterator peer = to_peers.begin();
+  list<TCPSession>::const_iterator peer = to_peers.begin();
   while (peer != to_peers.end() && i < max_fds) {
     //logger.Log(LOG_DEBUGGING, "event_load_poll(): Checking peer %s, connected: %d.", peer->print().c_str(), peer->IsConnected());
 
@@ -73,7 +73,7 @@ int tcp_event_poll_init(const list<SSLSession>& to_peers,
     peer++;  // increment our loop counter ;-)
   }
 
-  // Walk our second list checking SSLSession objects for an *open*
+  // Walk our second list checking TCPSession objects for an *open*
   // file descriptor ...
 
   peer = from_peers.begin();
@@ -122,13 +122,13 @@ int tcp_event_poll_status(struct pollfd pollfds[], int nfds, int start_index) {
   return -1;  // hmm, didn't find one
 }
 
-// This poll(3)-based routine returns the SSLSession peer that is
+// This poll(3)-based routine returns the TCPSession peer that is
 // associated with a file descriptor.
-list<SSLSession>::iterator
+list<TCPSession>::iterator
 tcp_event_poll_get_peer(const ConfInfo& info, const int fd, 
-                        list<SSLSession>* peers) {
-  // Look for the SSLSession that matches the ready fd in peers ...
-  list<SSLSession>::iterator peer = peers->begin();
+                        list<TCPSession>* peers) {
+  // Look for the TCPSession that matches the ready fd in peers ...
+  list<TCPSession>::iterator peer = peers->begin();
   while (peer != peers->end()) {
     if (peer->fd() == fd)
       return peer;
@@ -136,25 +136,25 @@ tcp_event_poll_get_peer(const ConfInfo& info, const int fd,
     peer++;
   }
 
-  // If we made it here, we couldn't find a SSLSession.  Note, this
+  // If we made it here, we couldn't find a TCPSession.  Note, this
   // does not mean a problem, as it could be in the other
-  // list<SSLSession>, i.e., to_peers or from_peers!
+  // list<TCPSession>, i.e., to_peers or from_peers!
 
   //logger.Log(LOG_DEBUG, "tcp_event_poll_get_peer(): Unable to find peer for fd: %d.", fd);
 
   return peer;  // peer == peers->end()
 }
 
-// Routine to "accept()" a connection, and load it into our SSLSession list.
+// Routine to "accept()" a connection, and load it into our TCPSession list.
 int tcp_event_accept(const ConfInfo& info, const SSLConn& server, 
                      const int max_open_connections, const int framing,
-                     SSLContext* ssl_context, list<SSLSession>* from_peers) {
+                     SSLContext* ssl_context, list<TCPSession>* from_peers) {
   //logger.Log(LOG_DEBUGGING, "tcp_event_accept(): checking server's listen socket: %d.", server.fd());
 
-  // Setup a temporary list<SSLSession> element.
-  SSLSession tmp_peer(framing);
+  // Setup a temporary list<TCPSession> element.
+  TCPSession tmp_peer(framing);
   tmp_peer.Init();  // set aside buffer space
-  server.Accept(&tmp_peer);  // call accept(2) to populate tmp_peer
+  server.Accept(&tmp_peer, ssl_context);  // call accept(2) to populate tmp_peer
   if (error.Event()) {
     logger.Log(LOG_NETWORK, "Unable to accept connection: %s.", 
                error.print().c_str());
@@ -194,7 +194,7 @@ int tcp_event_accept(const ConfInfo& info, const SSLConn& server,
   // TODO(aka) Because there are kernels out in the wild that do not
   // adhere to IANA's defined port ranges, e.g., dynamic =
   // 49152:65535, for ephemeral port assignment, can our comparisons
-  // against our SSLSession queue ignore the port? That is, if we
+  // against our TCPSession queue ignore the port? That is, if we
   // already had a TCPConn element in our queue for the peer that just
   // connected via the accept(), then we will have more than one entry
   // for that host with (probably) different ports, yet our various
@@ -204,16 +204,16 @@ int tcp_event_accept(const ConfInfo& info, const SSLConn& server,
 }
 
 // Routine to read any data on a socket (file descriptor) and load it
-// into our SSLSession buffer for later processing within the main's
+// into our TCPSession buffer for later processing within the main's
 // event-loop.
 //
-// We call SSLSession::Read() to get the work done.  If we requested
+// We call TCPSession::Read() to get the work done.  If we requested
 // *streaming* file I/O, then we additionally call
-// SSLSession::StreamRbuf() to send the chunk(s) of data read to a
+// TCPSession::StreamRbuf() to send the chunk(s) of data read to a
 // file (rfile_).  TODO(aka) Unfortunately, in streaming mode this
 // means that our internal read buffer is now acting as a copy
 // buffer!) to File object rfile_.
-void tcp_event_read(const ConfInfo& info, list<SSLSession>::iterator peer) {
+void tcp_event_read(const ConfInfo& info, list<TCPSession>::iterator peer) {
   /*
   // TODO(aka) Uh, do we need this in pollin()?
 
@@ -293,9 +293,9 @@ void tcp_event_read(const ConfInfo& info, list<SSLSession>::iterator peer) {
 
 }
 
-// Routine to write any data within the SSLSession to the verified
+// Routine to write any data within the TCPSession to the verified
 // *ready* socket.
-void tcp_event_write(const ConfInfo& info, list<SSLSession>::iterator peer) {
+void tcp_event_write(const ConfInfo& info, list<TCPSession>::iterator peer) {
   // When using NON_BLOCKING I/O, select(2)'s firing may be to report
   // an ERROR on the socket, not that the socket is ready for writing.
   // Thus, before attempting anything on the fd, we need to check the
@@ -364,12 +364,12 @@ void tcp_event_write(const ConfInfo& info, list<SSLSession>::iterator peer) {
 //
 // TODO(aka) Honestly, this routine makes no sense with HTTP, and in
 // fact, doesn't do anything when using HTTP, so why do we have it?
-list<SSLSession>::iterator 
+list<TCPSession>::iterator 
 tcp_event_synchronize_connection(const bool receiver_initiated_flag, 
                                  ConfInfo* info,
-                                 list<SSLSession>* to_peers, 
-                                 list<SSLSession>* from_peers,
-                                 list<SSLSession>::iterator peer) {
+                                 list<TCPSession>* to_peers, 
+                                 list<TCPSession>* from_peers,
+                                 list<TCPSession>::iterator peer) {
   switch (peer->rhdr().type()) {
     case MsgHdr::TYPE_BASIC :
 #if USING_P2P
@@ -383,7 +383,7 @@ tcp_event_synchronize_connection(const bool receiver_initiated_flag,
           // decide if we should replace this node with the one in
           // to_peers or not.
 
-          list<SSLSession>::iterator to_peer = to_peers->begin();
+          list<TCPSession>::iterator to_peer = to_peers->begin();
           while (to_peer != to_peers->end()) {
             if (to_peer->handle() == peer->rhdr().basic_hdr().id)
               break;
@@ -413,7 +413,7 @@ tcp_event_synchronize_connection(const bool receiver_initiated_flag,
             to_peers->remove(*to_peer);
 
             // Build the message RESPONSE.
-            peer->ShiftRpending();  // remove processed message from SSLSession
+            peer->ShiftRpending();  // remove processed message from TCPSession
             struct BasicFramingHdr basic_hdr;
             basic_hdr.id = info->id_;  // our id
             basic_hdr.msg_id = ++msg_id_hash;  // unique msg id
@@ -438,7 +438,7 @@ tcp_event_synchronize_connection(const bool receiver_initiated_flag,
 
             /*
             // For Debugging:
-            for (list<SSLSession>::const_iterator foo = to_peers->begin(); foo != to_peers->end(); foo++)
+            for (list<TCPSession>::const_iterator foo = to_peers->begin(); foo != to_peers->end(); foo++)
             logger.Log(LOG_DEBUGGING, "tcp_event_synchronize_connection(): Peer %d: %s.", foo->id(), foo->print().c_str());
             */
           } else {  // if ((!to_peer->IsConnected() || to_peer->wpending().size() > 0) ||
@@ -450,7 +450,7 @@ tcp_event_synchronize_connection(const bool receiver_initiated_flag,
             //logger.Log(LOG_DEBUGGING, "Cleaning %ld byte msg-body for request (%s) from peer %s.", peer->rhdr().msg_len(), peer->rhdr().print().c_str(), peer->print().c_str());
 
             peer->Close();
-            peer->ShiftRpending();  // remove processed message from SSLSession
+            peer->ShiftRpending();  // remove processed message from TCPSession
             peer = from_peers->erase(peer);
           }  // else if ((!to_peer->IsConnected() || to_peer->wpending().size() > 0) ||
         } else {  // if (peer->rhdr().basic_hdr().type == MSG_REQ_INIT) {
@@ -470,7 +470,7 @@ tcp_event_synchronize_connection(const bool receiver_initiated_flag,
         info->established_connections_++;
 
         // If the peer is in from_peers (TOOD(aka) can this happen?), close & remove it.
-        list<SSLSession>::iterator from_peer = from_peers->begin();
+        list<TCPSession>::iterator from_peer = from_peers->begin();
         while (from_peer != from_peers->end()) {
           if (from_peer->handle() == peer->handle())
             break;
@@ -495,7 +495,7 @@ tcp_event_synchronize_connection(const bool receiver_initiated_flag,
                      "whdrs_ != 1.");
 
         peer->whdrs().erase(peer->whdrs().begin());
-        peer->ShiftRpending();  // remove processed message from SSLSession
+        peer->ShiftRpending();  // remove processed message from TCPSession
 
         // Finally, send out our current file directory.
         struct BasicFramingHdr basic_hdr;
