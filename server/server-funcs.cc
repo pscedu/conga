@@ -28,6 +28,12 @@ static const char* kRyuControllerName = "tango.psc.edu";
 static const in_port_t kRyuControllerPort = 8080;
 static const char* kRyuQueryStats = "stats";
 static const char* kRyuQueryMeter = "meter";
+static const char* kRyuQueryFlow = "flow";
+
+static const char* kNameAllocationID = "allocation-id";
+static const char* kNameExpiration = "expires";
+
+static const char* kDetailState = "state";
 
 
 // Main utility functions.
@@ -360,7 +366,7 @@ void initiate_stats_meter_request(const ConfInfo& info, const string& dpid,
   tmp_session.Socket(PF_INET, SOCK_STREAM, 0, NULL);
   //tmp_session.set_handle(tmp_session.fd());  // for now, set it to the socket
   if (error.Event()) {
-    error.AppendMsg("initiate_stats_meterconfig_request():");
+    error.AppendMsg("initiate_stats_meter_request():");
     return;
   }
 
@@ -370,10 +376,6 @@ void initiate_stats_meter_request(const ConfInfo& info, const string& dpid,
   // example: GET http://tango.psc.edu:8080/stats/meter/1229782937975278821
 
   char path_buf[kURLMaxSize];
-
-  // Note, kInfluxQueryMetrics ends in "where flow='", so we must add
-  // the flow along with the suffix (i.e., ' limit 1).
-
   snprintf(path_buf, kURLMaxSize - 1, "%s/%s/%s",
            kRyuQueryStats, kRyuQueryMeter, dpid.c_str());
   URL query_url;
@@ -398,29 +400,247 @@ void initiate_stats_meter_request(const ConfInfo& info, const string& dpid,
   query_http_hdr.AppendMsgHdr(mime_msg_hdr);
 #endif
 
-  logger.Log(LOG_DEBUG, "initiate_stats_meterconfig_request(): Generated HTTP headers:\n%s", query_http_hdr.print_hdr(0, true).c_str());
+  logger.Log(LOG_DEBUG, "initiate_stats_meter_request(): Generated HTTP headers:\n%s", query_http_hdr.print_hdr(0, true).c_str());
 
+  // Setup opaque MsgHdr for TCPSession, and add HTTP header to it.
   MsgHdr tmp_msg_hdr(MsgHdr::TYPE_HTTP);
   tmp_msg_hdr.Init(++msg_id_hash, query_http_hdr);
   tmp_session.AddMsgBuf(query_http_hdr.print_hdr(0, true).c_str(),
                         query_http_hdr.hdr_len(true), "", 0, tmp_msg_hdr);
   if (error.Event()) {
-    logger.Log(LOG_ERR, "initiate_stats_meterconfig_request(): "
+    logger.Log(LOG_ERR, "initiate_stats_meter_request(): "
                "failed to build msg: %s", error.print().c_str());
     return;
   }
 
 #if DEBUG_MUTEX_LOCK
-  warnx("initiate_stats_meterconfig_request(): requesting to_peers lock.");
+  warnx("initiate_stats_meter_request(): requesting to_peers lock.");
 #endif
   pthread_mutex_lock(to_peers_mtx);
   to_peers->push_back(tmp_session);
 #if DEBUG_MUTEX_LOCK
-  warnx("initiate_stats_meterconfig_request(): releasing to_peers lock.");
+  warnx("initiate_stats_meter_request(): releasing to_peers lock.");
 #endif
   pthread_mutex_unlock(to_peers_mtx);
 
   logger.Log(LOG_NOTICE, "Initiating request to %s for meter stats on: %s.",
              tmp_session.print_2tuple().c_str(), dpid.c_str());
+}
+
+// Routine to *initiate* the sending of a POST request to the RYU
+// controller for a specific destinations meter id via the
+// stats/flow/dpid api.
+//
+//  Note, main()'s event-loop will take care of opening the connetion
+//  and sending the data out.
+void initiate_stats_flow_request(const ConfInfo& info, const string& dpid,
+                                 const string& new_dst,
+                                 const SwitchInfo& controller, 
+                                 list<TCPSession>* to_peers,
+                                 pthread_mutex_t* to_peers_mtx) {
+  // Setup a client connection to the Ryu controller.
+  TCPSession tmp_session(MsgHdr::TYPE_HTTP);
+  tmp_session.Init();  // set aside buffer space
+  tmp_session.SSLConn::Init(kRyuControllerName, AF_INET, 
+                            IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
+  tmp_session.set_port(kRyuControllerPort);
+  tmp_session.set_blocking();
+  tmp_session.Socket(PF_INET, SOCK_STREAM, 0, NULL);
+  if (error.Event()) {
+    error.AppendMsg("initiate_stats_flow_request():");
+    return;
+  }
+
+  // Build a (HTTP) framing header and load the framing header into
+  // our TCPSession's MsgHdr list.  Sample request:
+  //
+  //0000: POST /stats/flow/1229782937975278821 HTTP/1.1
+  //002f: Host: tango.psc.edu:8080
+  //0049: User-Agent: curl/7.43.0
+  //0062: Accept: */*
+  //006f: Content-Length: 72
+  //0083: Content-Type: application/x-www-form-urlencoded
+  //00b4: 
+  //=> Send data, 72 bytes (0x48)
+  //0000: {"match": {"dl_type": 2048, "dl_vlan": "4010", "nw_dst": "10.10.
+  //0040: 3.113"}}
+  //
+  //curl -X POST -d '{"match": {"dl_type": 2048, "dl_vlan": "4010", "nw_dst": "10.10.3.113"}}' http://tango.psc.edu:8080/stats/flow/1229782937975278821
+
+  char path_buf[kURLMaxSize];
+  snprintf(path_buf, kURLMaxSize - 1, "%s/%s/%s",
+           kRyuQueryStats, kRyuQueryFlow, dpid.c_str());
+  URL query_url;
+  query_url.Init("http", kRyuControllerName, kRyuControllerPort,
+                 path_buf, strlen(path_buf), NULL, 0, NULL);
+  HTTPFraming query_http_hdr;
+  query_http_hdr.InitRequest(HTTPFraming::POST, query_url);
+
+  // Build message-body.
+  char tmp_body[kHTTPMsgBodyMaxSize];
+  snprintf(tmp_body, kHTTPMsgBodyMaxSize - 1, "{\"match\": {\"dl_type\": %d, "
+           "\"dl_vlan\": \"%d\", \"nw_dst\": \"%s\"}}",
+           controller.dl_type_, controller.lan_vlan_, new_dst.c_str());
+
+  // Add HTTP message-headers (for host, Accept and content type & length).
+  struct rfc822_msg_hdr mime_msg_hdr;
+  mime_msg_hdr.field_name = MIME_HOST;
+  char tmp_value[kURLMaxSize];
+  snprintf(tmp_value, kURLMaxSize - 1, "%s:%hu", 
+           kRyuControllerName, kRyuControllerPort);
+  mime_msg_hdr.field_value = tmp_value;
+  query_http_hdr.AppendMsgHdr(mime_msg_hdr);
+
+#if 0  // Add Accept: */* header
+  mime_msg_hdr.field_name = MIME_ACCEPT;
+  snprintf(tmp_value, kURLMaxSize - 1, "*/*");
+  mime_msg_hdr.field_value = tmp_value;
+  query_http_hdr.AppendMsgHdr(mime_msg_hdr);
+#endif
+
+  mime_msg_hdr.field_name = MIME_CONTENT_TYPE;
+  mime_msg_hdr.field_value = MIME_APP_X_WWW_FORM_URLENCODED;
+  query_http_hdr.AppendMsgHdr(mime_msg_hdr);
+
+  mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
+  char tmp_buf[64];
+  snprintf(tmp_buf, 64, "%ld", (long)strlen(tmp_body));
+  mime_msg_hdr.field_value = tmp_buf;
+  query_http_hdr.AppendMsgHdr(mime_msg_hdr);
+
+  logger.Log(LOG_DEBUG, "initiate_stats_flow_request(): Generated HTTP message:\n%s%s", query_http_hdr.print_hdr(0, true).c_str(), tmp_body);
+
+  // Setup opaque MsgHdr for TCPSession, and add HTTP header to it.
+  MsgHdr tmp_msg_hdr(MsgHdr::TYPE_HTTP);
+  tmp_msg_hdr.Init(++msg_id_hash, query_http_hdr);
+  tmp_session.AddMsgBuf(query_http_hdr.print_hdr(0, true).c_str(),
+                        query_http_hdr.hdr_len(true),
+                        tmp_body, query_http_hdr.msg_len(), tmp_msg_hdr);
+  if (error.Event()) {
+    logger.Log(LOG_ERR, "initiate_stats_flow_request(): "
+               "failed to build msg: %s", error.print().c_str());
+    return;
+  }
+
+#if DEBUG_MUTEX_LOCK
+  warnx("initiate_stats_flow_request(): requesting to_peers lock.");
+#endif
+  pthread_mutex_lock(to_peers_mtx);
+  to_peers->push_back(tmp_session);
+#if DEBUG_MUTEX_LOCK
+  warnx("initiate_stats_flow_request(): releasing to_peers lock.");
+#endif
+  pthread_mutex_unlock(to_peers_mtx);
+
+  logger.Log(LOG_NOTICE, "Initiating request to %s for flow stats on: %s.",
+             tmp_session.print_2tuple().c_str(), dpid.c_str());
+}
+
+// Routine to initiate a response to post/allocation request.
+void initiate_post_allocation_response(const ConfInfo& info,
+                                       const FlowInfo& flow,
+                                       const string& err_msg,
+                                       list<TCPSession>* from_peers,
+                                       pthread_mutex_t* from_peers_mtx) {
+  // First, find the peer that initially made this request (that we're
+  // responding to).
+
+#if DEBUG_MUTEX_LOCK
+  warnx("initiate_post_allocation_response(): requesting from_peers lock.");
+#endif
+  pthread_mutex_lock(from_peers_mtx);
+
+  list<TCPSession>::iterator peer_itr = from_peers->begin();
+  while (peer_itr != from_peers->end()) {
+    if (peer_itr->handle() == flow.peer_)
+      break;  // found it
+    peer_itr++;
+  }
+  if (peer_itr == from_peers->end()) {
+    logger.Log(LOG_ERR, "initiate_post_allocation_response(): "
+               "Failed to find handle %d in from peers.", flow.peer_);
+    return;
+  }
+
+  char tmp_body[kHTTPMsgBodyMaxSize];
+  if (strlen(err_msg.c_str()) <= 0) {
+    // Build message-body.
+    string state = "queued";
+    int status = 0;
+    snprintf(tmp_body, kHTTPMsgBodyMaxSize - 1, 
+             "{ \"status\":%d, \"results\": [ { "
+             "\"%s\":\"%s\", \"%s\":%d, \"%s\":\"%s\" } ] }",
+             status,
+             kNameAllocationID, flow.allocation_id_.c_str(), 
+             kNameExpiration, (int)flow.expiration_,
+             kDetailState, state.c_str());
+  } else {
+    // Build message-body.
+    string state = "error";
+    int status = 1;
+    snprintf(tmp_body, kHTTPMsgBodyMaxSize - 1, 
+             "{ \"status\":%d, \"errors\": [ { "
+             "\"description\":\"%s\" } ] }",
+             status, err_msg.c_str());
+  }
+
+  printf("DEBUG: XXX sending response: %s.\n", tmp_body);
+
+  // Setup HTTP RESPONSE message header.
+  HTTPFraming ack_hdr;
+  ack_hdr.InitResponse(200, HTTPFraming::CLOSE);
+
+  // Add HTTP content-type and content-length message-headers.
+  struct rfc822_msg_hdr mime_msg_hdr;
+  mime_msg_hdr.field_name = MIME_CONTENT_TYPE;
+  mime_msg_hdr.field_value = MIME_APP_JSON;
+  ack_hdr.AppendMsgHdr(mime_msg_hdr);
+  if (error.Event()) {
+    error.AppendMsg("initiate_post_allocation_response()");
+    return;
+  }
+
+  mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
+  char tmp_buf[64];
+  snprintf(tmp_buf, 64, "%ld", (long)strlen(tmp_body));
+  mime_msg_hdr.field_value = tmp_buf;
+  ack_hdr.AppendMsgHdr(mime_msg_hdr);
+  if (error.Event()) {
+    error.AppendMsg("initiate_post_allocation_response()");
+    return;
+  }
+
+  // Setup opaque MsgHdr for TCPSession, and add HTTP header to it.
+  MsgHdr ack_msg_hdr(MsgHdr::TYPE_HTTP);
+  ack_msg_hdr.Init(++msg_id_hash, ack_hdr);  // HTTP has no id
+  if (error.Event()) {
+    error.AppendMsg("initiate_post_allocation_response()");
+    return;
+  }
+
+  // And add the message to our TCPSession queue for transmission.
+  peer_itr->AddMsgBuf(ack_hdr.print_hdr(0, false).c_str(),
+                      ack_hdr.hdr_len(false), 
+                      tmp_body, ack_hdr.msg_len(), ack_msg_hdr);
+  if (error.Event()) {
+    error.AppendMsg("initiate_post_allocation_response()");
+    return;  // AddMsgFile() throws events before updating peer
+  }
+
+  //logger.Log(LOG_DEBUG, "initiate_post_allocation_response(): processed request %s; %s is waiting transmission to %s, contents: %s", http_hdr.print_start_line(false).c_str(), ack_hdr.print().c_str(), peer->print().c_str(), msg.c_str());
+
+  logger.Log(LOG_NOTICE, "Processed POST allocations "
+             "(ID:%s, Key:%s, src:%s, dst:%s, duration:%d) from %s.",
+             flow.allocation_id_.c_str(),
+             flow.api_key_.c_str(),
+             flow.src_ip_.c_str(),
+             flow.dst_ip_.c_str(),
+             flow.duration_,
+             peer_itr->hostname().c_str());
+
+#if DEBUG_MUTEX_LOCK
+  warnx("initiate_post_allocation_response(): releasing from_peers lock.");
+#endif
+  pthread_mutex_unlock(from_peers_mtx);
 }
 

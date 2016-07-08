@@ -29,8 +29,8 @@ struct conga_incoming_msg_args {
   //const string& dpid;
   list<MeterInfo>* sdn_state;
   pthread_mutex_t* sdn_state_mtx;
-  list<AuthInfo>* api_keys;
-  pthread_mutex_t* api_keys_mtx;
+  list<AuthInfo>* authenticators;
+  pthread_mutex_t* authenticators_mtx;
   list<FlowInfo>* flows;
   pthread_mutex_t* flow_list_mtx;
   list<TCPSession>* to_peers;
@@ -60,6 +60,8 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                             //XXX const string& dpid,
                             list<MeterInfo>* sdn_state,
                             pthread_mutex_t* sdn_state_mtx,
+                            list<FlowInfo>* flows, 
+                            pthread_mutex_t* flow_list_mtx,
                             list<TCPSession>::iterator peer, 
                             list<MsgHdr>::iterator req_hdr);
 string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr,

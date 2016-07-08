@@ -30,7 +30,7 @@ LIBS =  -lssl -lcrypto -lpthread
 CXXOPTIM =
 CXXPATH =
 
-OBJS = SwitchInfo.o MeterInfo.o FlowInfo.o tcp-event-procs.o conga-procs.o server-funcs.o
+OBJS = SwitchInfo.o MeterInfo.o FlowInfo.o AuthInfo.o tcp-event-procs.o conga-procs.o server-funcs.o
 
 all: conga
 

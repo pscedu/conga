@@ -78,14 +78,16 @@ static const char* kDetailIsActive = "is_active";
 static const size_t kAPIKeySize = 16;
 
 // RYU elements.
+static const char* kNameActions = "actions";
 static const char* kNameMeterID = "meter_id";
 static const char* kNameBandStats = "band_stats";
 static const char* kNameBands = "bands";
+static const char* kNameFlags = "flags";
 static const char* kNameRate = "rate";
 static const char* kNameByteBandCount = "byte_band_count";
 static const char* kNameByteInCount = "byte_in_count";
-
-static size_t allocation_id_cnt = 0;
+static const char* kNameMatch = "match";
+static const char* kNameNwDst = "nw_dst";
 
 // Routine to process a ready (incoming) message in our TCPSession
 // object.  This routine must deal with both the message framing *and*
@@ -97,8 +99,8 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
                                 //const string& dpid,
                                 list<MeterInfo>* sdn_state,
                                 pthread_mutex_t* sdn_state_mtx,
-                                list<AuthInfo>* api_keys, 
-                                pthread_mutex_t* api_keys_mtx,
+                                list<AuthInfo>* authenticators, 
+                                pthread_mutex_t* authenticators_mtx,
                                 list<FlowInfo>* flows,
                                 pthread_mutex_t* flow_list_mtx,
                                 list<TCPSession>* to_peers,
@@ -196,7 +198,7 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
 
         // Process message based on our application.
         conga_process_response(*info, msg_hdr, msg_body, msg_data,
-                               sdn_state, sdn_state_mtx,
+                               sdn_state, sdn_state_mtx, flows, flow_list_mtx,
                                peer, req_hdr);
 
         peer->delete_whdr(req_hdr->msg_id());  // clean-up whdrs,
@@ -268,14 +270,16 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
                     ret_msg = conga_process_post_auth(*info, http_hdr, 
                                                       msg_body, msg_data,
                                                       ssl_context,
-                                                      api_keys, api_keys_mtx,
+                                                      authenticators,
+                                                      authenticators_mtx,
                                                       peer);
                   } else if (!service.compare(0, strlen(kServiceAllocations),
                                               kServiceAllocations)) {
                     ret_msg =
                         conga_process_post_allocations(*info, http_hdr, 
                                                        msg_body, msg_data,
-                                                       api_keys, api_keys_mtx,
+                                                       authenticators,
+                                                       authenticators_mtx,
                                                        flows, flow_list_mtx,
                                                        peer);
                   } else {
@@ -293,14 +297,16 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
                   if (!service.compare(0, strlen(kServiceAuth), kServiceAuth)) {
                     ret_msg = conga_process_delete_auth(*info, http_hdr, 
                                                         msg_body, msg_data,
-                                                        api_keys, api_keys_mtx, 
+                                                        authenticators,
+                                                        authenticators_mtx, 
                                                         peer);
                   } else if (!service.compare(0, strlen(kServiceAllocations),
                                               kServiceAllocations)) {
                     ret_msg =
                         conga_process_delete_allocations(*info, http_hdr,
                                                          msg_body, msg_data, 
-                                                         api_keys, api_keys_mtx,
+                                                         authenticators,
+                                                         authenticators_mtx,
                                                          flows, flow_list_mtx,
                                                          peer);
                   } else {
@@ -317,14 +323,16 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
                   if (!service.compare(0, strlen(kServiceAuth), kServiceAuth)) {
                     ret_msg = conga_process_get_auth(*info, http_hdr, 
                                                      msg_body, msg_data,
-                                                     api_keys, api_keys_mtx, 
+                                                     authenticators,
+                                                     authenticators_mtx, 
                                                      peer);
                   } else if (!service.compare(0, strlen(kServiceAllocations),
                                               kServiceAllocations)) {
                     ret_msg =
                         conga_process_get_allocations(*info, http_hdr,
                                                       msg_body, msg_data, 
-                                                      api_keys, api_keys_mtx,
+                                                      authenticators,
+                                                      authenticators_mtx,
                                                       flows, flow_list_mtx,
                                                       peer);
                   } else {
@@ -354,7 +362,9 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
                 break;
             }  // switch (msg_hdr.basic_hdr().method()) {
 
-            // Catch any locally generated error events (i.e., connection is healthy).
+            // Catch any locally generated error events (i.e.,
+            // connection is healthy).
+
             if (error.Event()) {
               // We failed to process the REQUEST, so send our NACK
               // back.  Note, if the communication channel has since
@@ -375,14 +385,20 @@ bool conga_process_incoming_msg(ConfInfo* info, SSLContext* ssl_context,
               conga_gen_wsdl_response(*info, request_info, http_hdr, peer);
 #endif
             } else {
-              // Build the message RESPONSE as an HTTP message.
-              conga_gen_http_response(*info, http_hdr, ret_msg, peer);
+              // If ret_msg was set, process the response, else, head
+              // back to the main event-loop to do more work before
+              // processing the response.
 
-              // ... and log what we processed.
-              logger.Log(LOG_NOTICE, "Processed HTTP REQUEST (%s) from %s; "
+              if (ret_msg.size()) {
+                // Build the message RESPONSE as an HTTP message.
+                conga_gen_http_response(*info, http_hdr, ret_msg, peer);
+
+                // ... and log what we processed.
+                logger.Log(LOG_NOTICE, "Processed HTTP REQUEST (%s) from %s; "
                          "is awaiting delivery.",
                          http_hdr.print_start_line(false).c_str(), 
                          peer->print().c_str());
+              }
             }
 
             // Note, although it might seem like a good idea to delete
@@ -431,7 +447,7 @@ void* conga_concurrent_process_incoming_msg(void* ptr) {
   // Process the *complete* message.
   conga_process_incoming_msg(args->info, args->ssl_context, 
                              args->sdn_state, args->sdn_state_mtx,
-                             args->api_keys, args->api_keys_mtx,
+                             args->authenticators, args->authenticators_mtx,
                              args->flows, args->flow_list_mtx,
                              args->to_peers, args->to_peers_mtx, args->peer);
   if (error.Event()) {
@@ -463,7 +479,7 @@ void* conga_concurrent_process_incoming_msg(void* ptr) {
   pthread_mutex_unlock(args->thread_list_mtx);
 
   if (!found)
-    logger.Log(LOG_WARN, "conga_concurrent_process_incoming_msg(): "
+    logger.Log(LOG_WARNING, "conga_concurrent_process_incoming_msg(): "
                "TODO(aka) Unable to find thead id (%d).", pthread_self());
 
   //pthread_exit();  // implicitly called when we return
@@ -478,8 +494,8 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                             // XXX const string& dpid,
                             list<MeterInfo>* sdn_state,
                             pthread_mutex_t* sdn_state_mtx,
-                            // XXX list<FlowInfo>* flows, 
-                            // pthread_mutex_t* flow_list_mtx,
+                            list<FlowInfo>* flows, 
+                            pthread_mutex_t* flow_list_mtx,
                             list<TCPSession>::iterator peer, 
                             list<MsgHdr>::iterator req_hdr) {
   if (msg_hdr.http_hdr().status_code() == 200) {
@@ -492,10 +508,11 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
     }
 
     logger.Log(LOG_NOTICE, 
-               "Received RESPONSE \'%d %s\' from %s for REQUEST: %s.", 
+               "Received RESPONSE \'%d %s\', with %db message-body "
+               "from %s for REQUEST: %s.", 
                msg_hdr.http_hdr().status_code(), 
                status_code_phrase(msg_hdr.http_hdr().status_code()),
-               peer->TCPConn::print().c_str(), 
+               (int)msg_body.size(), peer->TCPConn::print().c_str(), 
                req_hdr->http_hdr().print_start_line(false).c_str());
 
 #if 0
@@ -504,6 +521,7 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                                         "Array", "String", "Number" };
 #endif
 
+    printf("XXX parsing: %s.\n", msg_body.c_str());
     // Parse JSON message-body.
     rapidjson::Document response;
     if (response.Parse(msg_body.c_str()).HasParseError()) {
@@ -529,9 +547,9 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
     }
 
     MeterInfo tmp_meter;
-    tmp_meter.dpid_ = dpid_itr->name.GetString();
+    string tmp_dpid = dpid_itr->name.GetString();
 
-    // Walk through dpid array, each tuple for stats/meter should consist of:
+    // Each tuple in a stats/meter response should consist of:
     //
     // { "duration_sec": 2577221, 
     //   "band_stats": [{
@@ -550,17 +568,18 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
     //      "burst_size": 0,
     //      "rate": 1000000,
     //      "type": "DROP"}],
-    //   "flags": ["KBPS"],
+    //   "flags": ["STATS", "KBPS"],
     //   "meter_id": 1}
     //
     // Finally, when we get an allocation request, we'll need to
     // process a stats/flow response in order to figure out what meter
-    // the flow is in.  It looks like:
+    // the flow is in.  It looks like this below (note, those idiots
+    // used the same elements, i.e., "flags" & "duration_sec" to
+    // represent different data types!):
     //
     // { "actions": [
     //      "METER:100",
-    //      "SET_FIELD: {
-    //         vlan_vid:8146}",
+    //      "SET_FIELD: { vlan_vid:8146 }",
     //      "SET_QUEUE:0",
     //      "OUTPUT:22"],
     //   "idle_timeout": 0,
@@ -577,15 +596,112 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
     //   "match": {
     //      "dl_type": 2048,
     //      "dl_vlan": "4010",
-    //      "nw_dst": "10.10.3.113"}}]
+    //      "nw_dst": "10.10.3.113"}}
+
+    // Walk over each dpid (although I suspect there'll be only one).
 
     // RAPIDJSON: Uses SizeType instead of size_t.
-    const rapidjson::Value& dpid = response[tmp_meter.dpid_.c_str()];
+    const rapidjson::Value& dpid = response[tmp_dpid.c_str()];
     for (rapidjson::SizeType i = 0; i < dpid.Size(); ++i) {
-      // First, see if there's a meter id.
+      tmp_meter.dpid_ = dpid_itr->name.GetString();
+
+      // We can process the stats/meter & stats/meterconfig the same,
+      // however, we need to process the stats/flow differently.
+
+      // PROCESS: stats/flow
+      if (dpid[i].HasMember(kNameActions)) {
+        const rapidjson::Value& actions = dpid[i][kNameActions];
+        if (!actions.IsArray()) {
+          logger.Log(LOG_WARNING, "conga_process_response(): "
+                     "%s is not an array in JSON from %s: %s",
+                     kNameActions, peer->hostname().c_str(), msg_body.c_str());
+          continue;
+        }
+
+        // Since it's a stats/flow, we're looking for the element that
+        // begins "METER:" ...
+
+#if 0  // For Debugging:
+        static const char* kTypeNames[] = { "Null", "False", "True", "Object", "Array", "String", "Number" };
+        for (rapidjson::Value::ConstMemberIterator action_itr = actions.MemberBegin(); action_itr != response.MemberEnd(); ++action_itr)
+          printf("DEBUG: XXX Working on %s (%s) ...\n", action_itr->name.GetString(), kTypeNames[action_itr->value.GetType()]);
+#endif
+
+        int tmp_meter = -1;
+        for (rapidjson::SizeType k = 0; k < actions.Size(); ++k) {
+          string tmp_element = actions[k].GetString();
+          if (tmp_element.compare(0, 6, "METER:") == 0) {
+            tmp_meter = atoi(tmp_element.substr(6).c_str());
+            break;
+          }
+        }
+        if (tmp_meter == -1) {
+          logger.Log(LOG_WARNING, "conga_process_response(): TODO(aka) "
+                     "Received stats/flow response, but unable to find METER "
+                     "in JSON from %s: %s.", 
+                     peer->hostname().c_str(), msg_body.c_str());
+          return;
+        } 
+
+        // In order to associate this meter with the correct flow,
+        // we need to grab the nw_dst element in the match element
+        // ...
+
+        if (!dpid[i].HasMember(kNameMatch)) {
+          logger.Log(LOG_WARNING, "conga_process_response(): "
+                     "%s is not in JSON from %s: %s",
+                     kNameMatch, peer->hostname().c_str(), msg_body.c_str());
+          return;
+        }
+
+        const rapidjson::Value& match = dpid[i][kNameMatch];
+        if (!match.IsObject() || !match.HasMember(kNameNwDst)) {
+          logger.Log(LOG_WARNING, "conga_process_response(): "
+                     "%s is not an object or %s is not in JSON from %s: %s",
+                     kNameMatch, kNameNwDst,
+                     peer->hostname().c_str(), msg_body.c_str());
+          return;
+        }
+
+        const rapidjson::Value& nw_dst = match[kNameNwDst];
+        if (!nw_dst.IsString()) {
+          logger.Log(LOG_WARNING, "conga_process_response(): "
+                     "%s is not a string in JSON from %s: %s",
+                     kNameNwDst, peer->hostname().c_str(), msg_body.c_str());
+          return;
+        }
+
+        string dst = nw_dst.GetString();
+
+#if DEBUG_MUTEX_LOCK
+        warnx("conga_process_response: requesting flow list lock.");
+#endif
+        pthread_mutex_lock(flow_list_mtx);
+        list<FlowInfo>::iterator flow_itr = flows->begin();
+        while (flow_itr != flows->end()) {
+          printf("DEBUG: XXX comparing %s to %s.\n", flow_itr->dst_ip_.c_str(), dst.c_str());
+          if (flow_itr->dst_ip_.compare(dst) == 0) {
+            flow_itr->meter_ = tmp_meter;
+            break;
+          }
+          flow_itr++;
+        }
+        if (flow_itr == flows->end()) {
+          logger.Log(LOG_WARNING, "conga_process_response(): TODO(aka) "
+                     "Unable to find dst %s in flow list", dst.c_str());
+          return;
+        }
+#if DEBUG_MUTEX_LOCK
+        warnx("conga_process_response: releasing flow list lock.");
+#endif
+        pthread_mutex_unlock(flow_list_mtx);
+        continue;  // head back to for loop, but we only ever have 1 dpid
+      }  // if (dpid[i].HasMember(kNameActions)) {
+
+      // PROCESS: stats/meter[config]
       if (!dpid[i].HasMember(kNameMeterID) || 
           !dpid[i][kNameMeterID].IsNumber()) {
-        logger.Log(LOG_INFO, "analyzer_process_response(): "
+        logger.Log(LOG_INFO, "conga_process_response(): "
                    "No %s in JSON from %s: %s",
                    kNameMeterID, peer->hostname().c_str(), msg_body.c_str());
         continue;
@@ -599,7 +715,7 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
       if (dpid[i].HasMember(kNameByteInCount)) {
         // Make sure it's a number.
         if (!dpid[i][kNameByteInCount].IsNumber()) {
-          logger.Log(LOG_WARN, "analyzer_process_response(): "
+          logger.Log(LOG_WARNING, "conga_process_response(): "
                      "%s is not a number in JSON from %s: %s",
                      kNameByteInCount, peer->hostname().c_str(), 
                      msg_body.c_str());
@@ -612,7 +728,7 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
         // Make sure it's an array before processing its values.
         const rapidjson::Value& band_stats = dpid[i][kNameBandStats];
         if (!band_stats.IsArray()) {
-          logger.Log(LOG_WARN, "analyzer_process_response(): "
+          logger.Log(LOG_WARNING, "conga_process_response(): "
                      "%s is not an array in JSON from %s: %s",
                      kNameBandStats, peer->hostname().c_str(), msg_body.c_str());
           continue;
@@ -622,7 +738,7 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
         for (rapidjson::SizeType j = 0; j < band_stats.Size(); ++j) {
           if (band_stats[j].HasMember(kNameByteBandCount)) {
             if (!band_stats[j][kNameByteBandCount].IsNumber()) {
-              logger.Log(LOG_WARN, "analyzer_process_response(): "
+              logger.Log(LOG_WARNING, "conga_process_response(): "
                          "%s is not a numbrer in JSON from %s: %s",
                          kNameByteBandCount, peer->hostname().c_str(),
                          msg_body.c_str());
@@ -638,7 +754,7 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
         // Make sure it's an array before processing its values.
         const rapidjson::Value& bands = dpid[i][kNameBands];
         if (!bands.IsArray()) {
-          logger.Log(LOG_WARN, "analyzer_process_response(): "
+          logger.Log(LOG_WARNING, "conga_process_response(): "
                      "%s is not an array in JSON from %s: %s",
                      kNameBands, peer->hostname().c_str(), msg_body.c_str());
           continue;
@@ -648,7 +764,7 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
         for (rapidjson::SizeType j = 0; j < bands.Size(); ++j) {
           if (bands[j].HasMember(kNameRate)) {
             if (!bands[j][kNameRate].IsNumber()) {
-              logger.Log(LOG_WARN, "analyzer_process_response(): "
+              logger.Log(LOG_WARNING, "conga_process_response(): "
                          "%s is not a numbrer in JSON from %s: %s",
                          kNameRate, peer->hostname().c_str(),
                          msg_body.c_str());
@@ -659,45 +775,83 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
         }
       }  // if (dpid[i].HasMember(kNameBands)) {
 
+      if (dpid[i].HasMember(kNameFlags)) {
+        // Make sure it's an array before processing its values.
+        const rapidjson::Value& flags = dpid[i][kNameFlags];
+        if (!flags.IsArray()) {
+          logger.Log(LOG_WARNING, "conga_process_response(): "
+                     "%s is not an array in JSON from %s: %s",
+                     kNameFlags, peer->hostname().c_str(), msg_body.c_str());
+          continue;
+        }
+
+        // Grab elements, hopefully one is a rate classification.
+        for (rapidjson::SizeType j = 0; j < flags.Size(); ++j) {
+          if (flags[j].HasMember(kNameRate)) {
+            if (!flags[j].IsString()) {
+              logger.Log(LOG_WARNING, "conga_process_response(): "
+                         "flags[%d] is not a string in JSON from %s: %s",
+                         j, peer->hostname().c_str(),
+                         msg_body.c_str());
+              continue;
+            }
+
+            string tmp_flag = flags[j].GetString();
+
+            // And let's skip "STATS".
+            if (!tmp_flag.compare("STATS"))
+              tmp_meter.flag_rate_ = tmp_flag;  // TODO(aka)
+                                                // technically if
+                                                // something other
+                                                // than a rate or
+                                                // STATS is in here,
+                                                // we could get
+                                                // overwritten!
+          }
+        }
+      }  // if (dpid[i].HasMember(kNameFlags)) {
+
       // Now, see if we add this meter to our sdn_state, or simply update it.
 #if DEBUG_MUTEX_LOCK
-      warnx("analyzer_process_response(): requesting sdn_state lock.");
+      warnx("conga_process_response(): requesting sdn_state lock.");
 #endif
       pthread_mutex_lock(sdn_state_mtx);
 
-      list<MeterInfo>::iterator sdn_state_itr = sdn_state->begin();
-      while (sdn_state_itr != sdn_state->end()) {
-        if (!tmp_meter.dpid_.compare(sdn_state_itr->dpid_) 
-            && tmp_meter.meter_ == sdn_state_itr->meter_)
+      list<MeterInfo>::iterator meter_itr = sdn_state->begin();
+      while (meter_itr != sdn_state->end()) {
+        if (!tmp_meter.dpid_.compare(meter_itr->dpid_) 
+            && tmp_meter.meter_ == meter_itr->meter_)
           break;  // found our meter
-        sdn_state_itr++;
+        meter_itr++;
       }
-      if (sdn_state_itr == sdn_state->end()) {
+      if (meter_itr == sdn_state->end()) {
         // Add new entry to our SDN state.
         tmp_meter.time_ = time(NULL);
         sdn_state->push_back(tmp_meter);
-        logger.Log(LOG_NOTICE, "Added new meter %d from %d, bytes in: %d",
+        logger.Log(LOG_NOTICE, "Added new meter %d from %s, bytes in: %lld",
                    tmp_meter.meter_, tmp_meter.dpid_.c_str(),
                    tmp_meter.byte_in_count_);
       } else {
         // Update our SDN state.
-        sdn_state_itr->rate_ = tmp_meter.rate_;
-        sdn_state_itr->prev_time_ = sdn_state_itr->time_;
-        sdn_state_itr->prev_byte_band_count_ = sdn_state_itr->byte_band_count_;
-        sdn_state_itr->prev_byte_in_count_ = sdn_state_itr->byte_in_count_;
-        sdn_state_itr->time_ = time(NULL);
-        sdn_state_itr->byte_band_count_ = tmp_meter.byte_band_count_;
-        sdn_state_itr->byte_in_count_ = tmp_meter.byte_in_count_;
-        int throughput = 
-            ((int)(sdn_state_itr->byte_in_count_ - 
-                   sdn_state_itr->prev_byte_in_count_) /
-             (int)(sdn_state_itr->time_ - sdn_state_itr->prev_time_));
-        logger.Log(LOG_NOTICE, "Updated meter %d from %d, throughput: %d",
-                   tmp_meter.meter_, tmp_meter.dpid_.c_str(),
-                   throughput);
-      }  // else if (sdn_state_itr != sdn_state->end()) {
+        meter_itr->rate_ = tmp_meter.rate_;
+        meter_itr->prev_time_ = meter_itr->time_;
+        meter_itr->prev_byte_band_count_ = meter_itr->byte_band_count_;
+        meter_itr->prev_byte_in_count_ = meter_itr->byte_in_count_;
+        meter_itr->time_ = time(NULL);
+        meter_itr->byte_band_count_ = tmp_meter.byte_band_count_;
+        meter_itr->byte_in_count_ = tmp_meter.byte_in_count_;
+
+#if 0  // For Debugging:
+        uint64_t throughput = 
+            (meter_itr->byte_in_count_ - meter_itr->prev_byte_in_count_) /
+            (meter_itr->time_ - meter_itr->prev_time_);
+
+        logger.Log(LOG_NOTICE, "Updated meter %d from %s, throughput: %lld",
+                   tmp_meter.meter_, tmp_meter.dpid_.c_str(), throughput);
+#endif
+      }  // else if (meter_itr != sdn_state->end()) {
 #if DEBUG_MUTEX_LOCK
-      warnx("analyzer_process_response(): releasing sdn_state lock.");
+      warnx("conga_process_response(): releasing sdn_state lock.");
 #endif
       pthread_mutex_unlock(sdn_state_mtx);
 
@@ -747,8 +901,8 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
 string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                                const string& msg_body, const File& msg_data,
                                SSLContext* ssl_context,
-                               list<AuthInfo>* api_keys, 
-                               pthread_mutex_t* api_keys_mtx,
+                               list<AuthInfo>* authenticators, 
+                               pthread_mutex_t* authenticators_mtx,
                                list<TCPSession>::iterator peer) {
   URL url = http_hdr.uri();
 
@@ -775,9 +929,9 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
 
   // See if they requested a renewal.
   if (details.HasMember(kDetailAPIKey) && details[kDetailAPIKey].IsString()) {
-    // Since we're just checking (reading) api_keys, we don't need a lock.
-    list<AuthInfo>::iterator api_key_itr = api_keys->begin();
-    while (api_key_itr != api_keys->end()) {
+    // Since we're just checking (reading) authenticators, we don't need a lock.
+    list<AuthInfo>::iterator api_key_itr = authenticators->begin();
+    while (api_key_itr != authenticators->end()) {
       string key = api_key_itr->api_key_;
       // API key is *not* case-sensitive!
       std::transform(key.begin(), key.end(), key.begin(), ::tolower);
@@ -787,7 +941,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
       api_key_itr++;
     }
 
-    if (api_key_itr == api_keys->end()) {
+    if (api_key_itr == authenticators->end()) {
       // They requested a renewal, but we have no record of this key!
       error.Init(EX_DATAERR, "conga_process_post_auth(): "
                  "API Key: %s, not found", details[kDetailAPIKey].GetString());
@@ -841,6 +995,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
   mime_msg_hdr.field_value = "0";
   auth_http_hdr.AppendMsgHdr(mime_msg_hdr);
 #endif
+
   // Add Host message-header.
   struct rfc822_msg_hdr mime_msg_hdr;
   mime_msg_hdr.field_name = MIME_HOST;
@@ -968,15 +1123,15 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
   // request, or the user has an existing api-key.
 
   if (details.HasMember(kDetailAPIKey) && details[kDetailAPIKey].IsString()) {
-    // Reaquire the iterator from api_keys for our key, as another
-    // thread may have mucked with api_keys since our earlier check.
+    // Reaquire the iterator from authenticators for our key, as another
+    // thread may have mucked with authenticators since our earlier check.
 
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_post_auth: requesting api keys lock.");
 #endif
-    pthread_mutex_lock(api_keys_mtx);
-    list<AuthInfo>::iterator api_key_itr = api_keys->begin();
-    while (api_key_itr != api_keys->end()) {
+    pthread_mutex_lock(authenticators_mtx);
+    list<AuthInfo>::iterator api_key_itr = authenticators->begin();
+    while (api_key_itr != authenticators->end()) {
       string key = api_key_itr->api_key_;
       // API key is *not* case-sensitive!
       std::transform(key.begin(), key.end(), key.begin(), ::tolower);
@@ -986,14 +1141,14 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
       api_key_itr++;
     }
 
-    if (api_key_itr == api_keys->end()) {
+    if (api_key_itr == authenticators->end()) {
       // This should never happen, but hey, who knows in MT land.
       error.Init(EX_DATAERR, "conga_process_post_auth(): "
                  "API Key: %s, is now missing", details[kDetailAPIKey].GetString());
 #if DEBUG_MUTEX_LOCK
       warnx("conga_process_post_auth: releasing api keys lock.");
 #endif
-      pthread_mutex_unlock(api_keys_mtx);
+      pthread_mutex_unlock(authenticators_mtx);
       return "";
     }
 
@@ -1015,7 +1170,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_post_auth: releasing api keys lock.");
 #endif
-    pthread_mutex_unlock(api_keys_mtx);
+    pthread_mutex_unlock(authenticators_mtx);
 
     logger.Log(LOG_NOTICE, "Processed POST auth (%s:%s, %s:%s, %s:%s) from %s.",
                kDetailUserID, api_key_itr->user_id_.c_str(),
@@ -1033,7 +1188,8 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
     new_key.start_time_ = start_time;
     new_key.end_time_ = end_time;
 
-    snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ { "
+    snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1,
+             "{ \"status\":%d, \"results\": [ { "
              "\"%s\":\"%s\", "
              "\"%s\": %d, \"%s\": %d, "
              "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
@@ -1048,12 +1204,14 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_post_auth: requesting api keys lock.");
 #endif
-    pthread_mutex_lock(api_keys_mtx);
-    api_keys->push_back(new_key);
+    pthread_mutex_lock(authenticators_mtx);
+    authenticators->push_back(new_key);
+    auth_info_list_save_state(info.auth_info_list_file_, *authenticators);
+
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_post_auth: releasing api keys lock.");
 #endif
-    pthread_mutex_unlock(api_keys_mtx);
+    pthread_mutex_unlock(authenticators_mtx);
 
     logger.Log(LOG_NOTICE, "Processed POST auth (%s:%s, %s:%s, %s:%s) from %s.",
                kDetailUserID, new_key.user_id_.c_str(),
@@ -1070,8 +1228,8 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
 string conga_process_delete_auth(const ConfInfo& info,
                                  const HTTPFraming& http_hdr,
                                  const string& msg_body, const File& msg_data,
-                                 list<AuthInfo>* api_keys, 
-                                 pthread_mutex_t* api_keys_mtx,
+                                 list<AuthInfo>* authenticators, 
+                                 pthread_mutex_t* authenticators_mtx,
                                  list<TCPSession>::iterator peer) {
   URL url = http_hdr.uri();
 
@@ -1085,13 +1243,14 @@ string conga_process_delete_auth(const ConfInfo& info,
     return "";
   }
 
-  // Search api_keys, locking it.
+  // Search authenticators, locking it.
 #if DEBUG_MUTEX_LOCK
   warnx("conga_process_delete_auth: requesting api keys lock.");
 #endif
-  pthread_mutex_lock(api_keys_mtx);
-  list<AuthInfo>::iterator api_key_itr = api_keys->begin();
-  while (api_key_itr != api_keys->end()) {
+  pthread_mutex_lock(authenticators_mtx);
+
+  list<AuthInfo>::iterator api_key_itr = authenticators->begin();
+  while (api_key_itr != authenticators->end()) {
     string key = api_key_itr->api_key_;
     // API key is *not* case-sensitive!
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
@@ -1101,14 +1260,14 @@ string conga_process_delete_auth(const ConfInfo& info,
     api_key_itr++;
   }
 
-  if (api_key_itr == api_keys->end()) {
+  if (api_key_itr == authenticators->end()) {
     // We have no record of this key (anymore?).
     error.Init(EX_DATAERR, "conga_process_delete_auth(): "
                "API Key: %s, not found", api_key.c_str());
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_delete_auth: releasing api keys lock.");
 #endif
-    pthread_mutex_unlock(api_keys_mtx);
+    pthread_mutex_unlock(authenticators_mtx);
     return "";
   }
 
@@ -1119,12 +1278,13 @@ string conga_process_delete_auth(const ConfInfo& info,
              api_key_itr->resource_id_.c_str());
 
   AuthInfo tmp_auth(*api_key_itr);  // save a copy before blowing it away
-  api_keys->erase(api_key_itr);
+  authenticators->erase(api_key_itr);
+  auth_info_list_save_state(info.auth_info_list_file_, *authenticators);
 
 #if DEBUG_MUTEX_LOCK
   warnx("conga_process_delete_auth: releasing api keys lock.");
 #endif
-  pthread_mutex_unlock(api_keys_mtx);
+  pthread_mutex_unlock(authenticators_mtx);
 
   string ret_msg(kHTTPMsgBodyMaxSize, '\0');
   int status = 0;
@@ -1149,8 +1309,8 @@ string conga_process_delete_auth(const ConfInfo& info,
 // Routine to ge the status of a user's token (api-key).
 string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                               const string& msg_body, const File& msg_data,
-                              list<AuthInfo>* api_keys, 
-                              pthread_mutex_t* api_keys_mtx,
+                              list<AuthInfo>* authenticators, 
+                              pthread_mutex_t* authenticators_mtx,
                               list<TCPSession>::iterator peer) {
   URL url = http_hdr.uri();
 
@@ -1174,7 +1334,7 @@ string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
     if (!key.compare(kDetailAPIKey)) {
       request_info->api_key_ = key_itr->value;
     } else {
-      logger.Log(LOG_WARN, "conga_process_get_auth(): Received unknown query: %s=%s.",
+      logger.Log(LOG_WARNING, "conga_process_get_auth(): Received unknown query: %s=%s.",
                  key.c_str(), key_itr->value.c_str());
     }
 
@@ -1189,13 +1349,13 @@ string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
   }
 #endif
 
-  // Search api_keys, locking it.
+  // Search authenticators, locking it.
 #if DEBUG_MUTEX_LOCK
   warnx("conga_process_get_auth: requesting api keys lock.");
 #endif
-  pthread_mutex_lock(api_keys_mtx);
-  list<AuthInfo>::iterator api_key_itr = api_keys->begin();
-  while (api_key_itr != api_keys->end()) {
+  pthread_mutex_lock(authenticators_mtx);
+  list<AuthInfo>::iterator api_key_itr = authenticators->begin();
+  while (api_key_itr != authenticators->end()) {
     string key = api_key_itr->api_key_;
     // API key is *not* case-sensitive!
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
@@ -1205,14 +1365,14 @@ string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
     api_key_itr++;
   }
 
-  if (api_key_itr == api_keys->end()) {
+  if (api_key_itr == authenticators->end()) {
     // We have no record of this key (anymore?).
     error.Init(EX_DATAERR, "conga_process_get_auth(): "
                "API Key: %s, not found", api_key.c_str());
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_get_auth: releasing api keys lock.");
 #endif
-    pthread_mutex_unlock(api_keys_mtx);
+    pthread_mutex_unlock(authenticators_mtx);
     return "";
   }
 
@@ -1243,7 +1403,7 @@ string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
 #if DEBUG_MUTEX_LOCK
   warnx("conga_process_get_auth: releasing api keys lock.");
 #endif
-  pthread_mutex_unlock(api_keys_mtx);
+  pthread_mutex_unlock(authenticators_mtx);
 
   logger.Log(LOG_NOTICE, "Processed GET auth (%s:%s, %s:%s, %s:%s) from %s.",
              kDetailAPIKey, api_key_itr->api_key_.c_str(),
@@ -1258,12 +1418,14 @@ string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
 // Routine to handle POST allocation requests.  If the user includes
 // an allocation_id within the RESTful request, then it's treated as a
 // renewal.
+//
+// TODO(aka) This routine can return void!
 string conga_process_post_allocations(const ConfInfo& info,
                                       const HTTPFraming& http_hdr,
                                       const string& msg_body,
                                       const File& msg_data,
-                                      list<AuthInfo>* api_keys, 
-                                      pthread_mutex_t* api_keys_mtx,
+                                      list<AuthInfo>* authenticators, 
+                                      pthread_mutex_t* authenticators_mtx,
                                       list<FlowInfo>* flows,
                                       pthread_mutex_t* flow_list_mtx,
                                       list<TCPSession>::iterator peer) {
@@ -1281,7 +1443,7 @@ string conga_process_post_allocations(const ConfInfo& info,
     if (!key.compare(kDetailAllocationID)) {
       request_info->allocation_id_ = itr->value;
     } else {
-      logger.Log(LOG_WARN, "conga_process_post_allocations(): "
+      logger.Log(LOG_WARNING, "conga_process_post_allocations(): "
                  "Received unknown query: %s=%s.",
                  key.c_str(), itr->value.c_str());
     }
@@ -1290,8 +1452,10 @@ string conga_process_post_allocations(const ConfInfo& info,
   }
 #endif
 
+#if 0  // And even more Deprecated code: Moved allocation_id to the json, so it behaved the same as api_key!
   size_t last_slash = url.path().find_last_of("/");
   string allocation_id = url.path().substr(last_slash + 1);
+#endif
 
   // Parse JSON message-body.
   rapidjson::Document details;
@@ -1303,7 +1467,7 @@ string conga_process_post_allocations(const ConfInfo& info,
 
   // Make sure our API key is valid.
   if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString()) {
-    error.Init(EX_DATAERR, "conga_process_post_allocations(): "
+    error.Init(EX_DATAERR, "conga_process_post_allocations(): TODO(aka) "
                "%s, %s, %s, %s or %s is invalid: %s", 
                kDetailAPIKey, kDetailProjectID, 
                kDetailSrcIP, kDetailDstIP, kDetailDuration, msg_body.c_str());
@@ -1313,9 +1477,9 @@ string conga_process_post_allocations(const ConfInfo& info,
 #if DEBUG_MUTEX_LOCK
   warnx("conga_process_post_allocations: requesting api keys lock.");
 #endif
-  pthread_mutex_lock(api_keys_mtx);
-  list<AuthInfo>::iterator api_key_itr = api_keys->begin();
-  while (api_key_itr != api_keys->end()) {
+  pthread_mutex_lock(authenticators_mtx);
+  list<AuthInfo>::iterator api_key_itr = authenticators->begin();
+  while (api_key_itr != authenticators->end()) {
     string key = api_key_itr->api_key_;
     // API key is *not* case-sensitive!
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
@@ -1324,15 +1488,14 @@ string conga_process_post_allocations(const ConfInfo& info,
 
     api_key_itr++;
   }
-
-  if (api_key_itr == api_keys->end()) {
+  if (api_key_itr == authenticators->end()) {
     // We have no record of this key (anymore?).
     error.Init(EX_DATAERR, "conga_process_post_allocations(): "
                "API Key: %s, not found", details[kDetailAPIKey].GetString());
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_post_allocations: releasing api keys lock.");
 #endif
-    pthread_mutex_unlock(api_keys_mtx);
+    pthread_mutex_unlock(authenticators_mtx);
     return "";
   }
 
@@ -1341,56 +1504,94 @@ string conga_process_post_allocations(const ConfInfo& info,
 #if DEBUG_MUTEX_LOCK
   warnx("conga_process_post_allocations: releasing api keys lock.");
 #endif
-  pthread_mutex_unlock(api_keys_mtx);
+  pthread_mutex_unlock(authenticators_mtx);
 
+  // Now, get the allocation id. 
+  string allocation_id;
+  if (details.HasMember(kDetailAllocationID) &&
+      details[kDetailAllocationID].IsString())
+    allocation_id = details[kDetailAllocationID].GetString();
+
+  // TODO(aka) Might want to get HTTP header in this debug ...
   logger.Log(LOG_DEBUG, "conga_process_post_allocations(): "
              "working on user: %s, project: %s, resource: %s "
              "and possible allocation id: %s.",
              our_auth.user_id_.c_str(), our_auth.project_id_.c_str(),
              our_auth.resource_id_.c_str(), allocation_id.c_str());
 
-  string ret_msg(kHTTPMsgBodyMaxSize, '\0');
-
-  // Now, see if this is a create or renewal request ...
-  if (allocation_id.size() <= 0) {
+  // And see if this is a create or renewal request ...
+  if (allocation_id.size() > 0) {
     // User requested a renewal.
+
+    // TODO(aka) This is tough, because we have to some how tell the
+    // main event-loop that this flow needs to re-check the desired
+    // flow stats, but that's currently done by looking for an empty
+    // allocation_id ... Actually, this may not be that bad, for
+    // either the allocation id has expired, in which case we can just
+    // zero it and process things normally, or it hasn't, and the
+    // meter info in the flow should be the same (hopefully), so we
+    // can just check the SDN state in here!
+
     error.Init(EX_DATAERR, "conga_process_post_allocations(): "
                "POST allocation renewal (%s) not supported yet",
                allocation_id.c_str());
-    return "";
-  } else {
-    // This is an instantiation request.
-    if (!details.HasMember(kDetailSrcIP) || !details[kDetailSrcIP].IsString() ||
-        !details.HasMember(kDetailDstIP) || !details[kDetailDstIP].IsString() ||
-        !details.HasMember(kDetailDuration) ||
-        !details[kDetailDuration].IsInt()) {
-      error.Init(EX_DATAERR, "conga_process_post_allocations(): "
-                 "%s, %s, %s or %s is invalid: %s", 
-                 kDetailProjectID, kDetailSrcIP, kDetailDstIP, kDetailDuration,
-                 msg_body.c_str());
-      return "";
-    }
 
-    // Generate a unique allocation id.
-    char tmp_buf[64];  // assuming no more than 64 digits (64 bits ~= 20 digits)
-    snprintf(tmp_buf, 64, "%ul", ++allocation_id_cnt);
-    allocation_id = tmp_buf;
+#if 0
+    // Make sure the flow already exist.
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_post_allocations: requesting flow list lock.");
+#endif
+    pthread_mutex_lock(flow_list_mtx);
+    list<FlowInfo>::iterator flow_itr = flows->begin();
+    while (flow_itr != flows->end()) {
+      string key = flow_itr->allocation_id_;
+      // Allocation ID is *not* case-sensitive!  (Is it even alpha-numeric?)
+      std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+      if (!key.compare(new_flow.allocation_id_)) {
+        exit(0); // XXX What are we doing here? Again?
+        error.Init(EX_DATAERR, "conga_process_post_allocations(): "
+                   "Allocation ID: %s already exists in flow table", 
+                   new_flow.allocation_id_.c_str());
+        return "";
+      }
+
+      flow_itr++;
+    }
+#if DEBUG_MUTEX_LOCK
+    warnx("conga_process_post_allocations: releasing flow list lock.");
+#endif
+    pthread_mutex_unlock(flow_list_mtx);
+#endif
+
+    return "";
+  } 
+
+  // This is an instantiation request, sanity check we have the
+  // necessary attributes.
+
+  if (!details.HasMember(kDetailSrcIP) || !details[kDetailSrcIP].IsString() ||
+      !details.HasMember(kDetailDstIP) || !details[kDetailDstIP].IsString() ||
+      !details.HasMember(kDetailDuration) ||
+      !details[kDetailDuration].IsInt()) {
+    error.Init(EX_DATAERR, "conga_process_post_allocations(): "
+               "%s, %s or %s is invalid: %s", 
+               kDetailSrcIP, kDetailDstIP, kDetailDuration,
+               msg_body.c_str());
+    return "";
   }
 
-  // See if our flow resources are available ...
-  logger.Log(LOG_EMERG, "conga_process_post_allocations(): XXX TODO(aka) Add code to submit request!");
-
-  //curl -X POST -d '{"match": {"dl_type": 2048, "dl_vlan": "4010", "nw_dst": "10.10.3.113"}}' http://tango.psc.edu:8080/stats/flow/1229782937975278821
-
-  exit(0);  // XXX not sure if we build our flow before or after we figure out its meter ...
+  // Build the *desired* flow.  We'll go back to our main event-loop
+  // and send out our stats/flow request to learn the meter-id based
+  // on the lack of allocation_id in our flow list.  And once we know
+  // the meter id for this src->dst, then we can check its throughput.
 
   // Build our new flow.
   FlowInfo new_flow;
-  new_flow.allocation_id_ = allocation_id;
   new_flow.api_key_ = details[kDetailAPIKey].GetString();
   new_flow.src_ip_ = details[kDetailSrcIP].GetString();
   new_flow.dst_ip_ = details[kDetailDstIP].GetString();
   new_flow.duration_ = details[kDetailDuration].GetInt();
+  new_flow.peer_ = peer->handle();
 
   // See what else we have ...
   if (details.HasMember(kDetailSrcPort) && details[kDetailSrcPort].IsInt())
@@ -1398,60 +1599,29 @@ string conga_process_post_allocations(const ConfInfo& info,
   if (details.HasMember(kDetailDstPort) && details[kDetailDstPort].IsInt())
     new_flow.dst_port_ = details[kDetailDstPort].GetInt();
 
-  // Make sure the flow doesn't already exist.
 #if DEBUG_MUTEX_LOCK
   warnx("conga_process_post_allocations: requesting flow list lock.");
 #endif
   pthread_mutex_lock(flow_list_mtx);
-  list<FlowInfo>::iterator flow_itr = flows->begin();
-  while (flow_itr != flows->end()) {
-    string key = flow_itr->allocation_id_;
-    // Allocation ID is *not* case-sensitive!  (Is it even alpha-numeric?)
-    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-    if (!key.compare(new_flow.allocation_id_)) {
-      error.Init(EX_DATAERR, "conga_process_post_allocations(): "
-                 "Allocation ID: %s already exists in flow table", 
-                 new_flow.allocation_id_.c_str());
-#if DEBUG_MUTEX_LOCK
-      warnx("conga_process_post_allocations: releasing flow list lock.");
-#endif
-      pthread_mutex_unlock(flow_list_mtx);
-      return "";
-    }
-
-    flow_itr++;
-  }
-
-  // If we made it here, we did not find a matching flow, so add our new one.
   flows->push_back(new_flow);
+
+  // Note, we don't bother saving state now, as this flow has not yet
+  // been allocated.
 
 #if DEBUG_MUTEX_LOCK
   warnx("conga_process_post_allocations: releasing flow list lock.");
 #endif
   pthread_mutex_unlock(flow_list_mtx);
 
-  string state = "queued";
-  int status = 0;
-
-  // Build the response.
-  snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, 
-           "{ \"status\":%d, \"results\": [ { "
-           "\"%s\":\"%s\", \"%s\":\"%s\" } ] }",
-           status,
-           kDetailAllocationID, new_flow.allocation_id_.c_str(), 
-           kDetailState, state.c_str());
-
-  logger.Log(LOG_NOTICE, "Processed POST allocations "
-             "(%s:%s, %s:%s, %s:%s, %s:%s, %s:%d) from %s.",
-             kDetailAllocationID, new_flow.allocation_id_.c_str(),
+  logger.Log(LOG_INFO, "Received new POST allocations "
+             "(%s:%s, %s:%s, %s:%s, %s:%d) from %s (%d).",
              kDetailAPIKey, new_flow.api_key_.c_str(),
              kDetailSrcIP, new_flow.src_ip_.c_str(),
              kDetailDstIP, new_flow.dst_ip_.c_str(),
              kDetailDuration, new_flow.duration_,
-             peer->hostname().c_str());
-
-  // Head back to conga_process_incoming_msg() to send RESPONSE out.
-  return ret_msg;
+             peer->hostname().c_str(), new_flow.peer_);
+  
+  return "";  // head back to main event-loop
 }
 
 // Routine to delete a flow.
@@ -1459,8 +1629,8 @@ string conga_process_delete_allocations(const ConfInfo& info,
                                         const HTTPFraming& http_hdr,
                                         const string& msg_body,
                                         const File& msg_data,
-                                        list<AuthInfo>* api_keys, 
-                                        pthread_mutex_t* api_keys_mtx,
+                                        list<AuthInfo>* authenticators, 
+                                        pthread_mutex_t* authenticators_mtx,
                                         list<FlowInfo>* flows,
                                         pthread_mutex_t* flow_list_mtx,
                                         list<TCPSession>::iterator peer) {
@@ -1486,18 +1656,16 @@ string conga_process_delete_allocations(const ConfInfo& info,
   // Make sure our API key is valid.
   if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString()) {
     error.Init(EX_DATAERR, "conga_process_delete_allocations(): "
-               "%s, %s, %s, %s or %s is invalid: %s", 
-               kDetailAPIKey, kDetailProjectID, 
-               kDetailSrcIP, kDetailDstIP, kDetailDuration, msg_body.c_str());
+               "%s is invalid: %s", kDetailAPIKey, msg_body.c_str());
     return "";
   } 
 
 #if DEBUG_MUTEX_LOCK
   warnx("conga_process_delete_allocations: requesting api keys lock.");
 #endif
-  pthread_mutex_lock(api_keys_mtx);
-  list<AuthInfo>::iterator api_key_itr = api_keys->begin();
-  while (api_key_itr != api_keys->end()) {
+  pthread_mutex_lock(authenticators_mtx);
+  list<AuthInfo>::iterator api_key_itr = authenticators->begin();
+  while (api_key_itr != authenticators->end()) {
     string key = api_key_itr->api_key_;
     // API key is *not* case-sensitive!
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
@@ -1507,14 +1675,14 @@ string conga_process_delete_allocations(const ConfInfo& info,
     api_key_itr++;
   }
 
-  if (api_key_itr == api_keys->end()) {
+  if (api_key_itr == authenticators->end()) {
     // We have no record of this key (anymore?).
     error.Init(EX_DATAERR, "conga_process_delete_allocations(): "
                "API Key: %s, not found", details[kDetailAPIKey].GetString());
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_delete_allocations: releasing api keys lock.");
 #endif
-    pthread_mutex_unlock(api_keys_mtx);
+    pthread_mutex_unlock(authenticators_mtx);
     return "";
   }
 
@@ -1523,13 +1691,14 @@ string conga_process_delete_allocations(const ConfInfo& info,
 #if DEBUG_MUTEX_LOCK
   warnx("conga_process_delete_allocations: releasing api keys lock.");
 #endif
-  pthread_mutex_unlock(api_keys_mtx);
+  pthread_mutex_unlock(authenticators_mtx);
 
   logger.Log(LOG_DEBUG, "conga_process_delete_allocations(): "
-             "working on user: %s, project: %s, resource: %s "
+             "working on user: %s, key: %s, project: %s, resource: %s "
              "and possible allocation id: %s.",
-             our_auth.user_id_.c_str(), our_auth.project_id_.c_str(),
-             our_auth.resource_id_.c_str(), allocation_id.c_str());
+             our_auth.user_id_.c_str(), our_auth.api_key_.c_str(),
+             our_auth.project_id_.c_str(), our_auth.resource_id_.c_str(),
+             allocation_id.c_str());
 
   // Find the flow that matches our allocation_id ...
 #if DEBUG_MUTEX_LOCK
@@ -1605,8 +1774,8 @@ string conga_process_get_allocations(const ConfInfo& info,
                                      const HTTPFraming& http_hdr,
                                      const string& msg_body,
                                      const File& msg_data,
-                                     list<AuthInfo>* api_keys, 
-                                     pthread_mutex_t* api_keys_mtx,
+                                     list<AuthInfo>* authenticators, 
+                                     pthread_mutex_t* authenticators_mtx,
                                      list<FlowInfo>* flows,
                                      pthread_mutex_t* flow_list_mtx,
                                      list<TCPSession>::iterator peer) {
@@ -1624,7 +1793,7 @@ string conga_process_get_allocations(const ConfInfo& info,
     if (!key.compare(kDetailAllocationID)) {
       request_info->allocation_id_ = itr->value;
     } else {
-      logger.Log(LOG_WARN, "conga_process_get_allocations(): Received unknown query: %s=%s.",
+      logger.Log(LOG_WARNING, "conga_process_get_allocations(): Received unknown query: %s=%s.",
                  key.c_str(), itr->value.c_str());
     }
 
@@ -1645,7 +1814,7 @@ string conga_process_get_allocations(const ConfInfo& info,
 
   // Make sure our API key is valid.
   if (!details.HasMember(kDetailAPIKey) || !details[kDetailAPIKey].IsString()) {
-    error.Init(EX_DATAERR, "conga_process_get_allocations(): "
+    error.Init(EX_DATAERR, "conga_process_get_allocations(): TODO(aka) "
                "%s, %s, %s, %s or %s is invalid: %s", 
                kDetailAPIKey, kDetailProjectID, 
                kDetailSrcIP, kDetailDstIP, kDetailDuration, msg_body.c_str());
@@ -1655,9 +1824,9 @@ string conga_process_get_allocations(const ConfInfo& info,
 #if DEBUG_MUTEX_LOCK
   warnx("conga_process_get_allocations: requesting api keys lock.");
 #endif
-  pthread_mutex_lock(api_keys_mtx);
-  list<AuthInfo>::iterator api_key_itr = api_keys->begin();
-  while (api_key_itr != api_keys->end()) {
+  pthread_mutex_lock(authenticators_mtx);
+  list<AuthInfo>::iterator api_key_itr = authenticators->begin();
+  while (api_key_itr != authenticators->end()) {
     string key = api_key_itr->api_key_;
     // API key is *not* case-sensitive!
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
@@ -1667,14 +1836,14 @@ string conga_process_get_allocations(const ConfInfo& info,
     api_key_itr++;
   }
 
-  if (api_key_itr == api_keys->end()) {
+  if (api_key_itr == authenticators->end()) {
     // We have no record of this key (anymore?).
     error.Init(EX_DATAERR, "conga_process_get_allocations(): "
                "API Key: %s, not found", details[kDetailAPIKey].GetString());
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_get_allocations: releasing api keys lock.");
 #endif
-    pthread_mutex_unlock(api_keys_mtx);
+    pthread_mutex_unlock(authenticators_mtx);
     return "";
   }
 
@@ -1683,7 +1852,7 @@ string conga_process_get_allocations(const ConfInfo& info,
 #if DEBUG_MUTEX_LOCK
   warnx("conga_process_get_allocations: releasing api keys lock.");
 #endif
-  pthread_mutex_unlock(api_keys_mtx);
+  pthread_mutex_unlock(authenticators_mtx);
 
   logger.Log(LOG_DEBUG, "conga_process_get_allocations(): "
              "working on user: %s, project: %s, resource: %s "
@@ -2164,7 +2333,6 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
            (int)(end_xerces_time.tv_usec/1000000.0)) - 
           (start_xerces_time.tv_sec + 
            (int)(start_xerces_time.tv_usec/1000000.0));
-      // XXX logger.Log(LOG_NOTICE, "conga_parse_xml(): PROFILING XML message parsed by Xerces-c in %ds.", time_xerces_diff);
 
       // For PROFILING:
       struct timeval start_internal_time;
@@ -2235,13 +2403,13 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
         // to be made WARNS or less.
 
         if (!strncasecmp("conga", child_name, strlen("conga"))) {
-          logger.Log(LOG_WARN, "conga_parse_xml(): TOOD(aka) "
+          logger.Log(LOG_WARNING, "conga_parse_xml(): TOOD(aka) "
                      "Found a conga element using only 4 charaters");
         } else if (!strncasecmp("output-format", child_name, 
                                 strlen("output-format"))) {
           DOMNode* value = child->getFirstChild();
           if (value == NULL) {
-            logger.Log(LOG_WARN, "conga_parse_xml(): TODO(aka) "
+            logger.Log(LOG_WARNING, "conga_parse_xml(): TODO(aka) "
                        "%s->getFirstChild() returned NULL.", child_name);
             XMLString::release(&child_name);
             continue;
@@ -2254,7 +2422,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
                                 strlen("bundle-format"))) {
           DOMNode* value = child->getFirstChild();
           if (value == NULL) {
-            logger.Log(LOG_WARN, "conga_parse_xml(): TODO(aka) "
+            logger.Log(LOG_WARNING, "conga_parse_xml(): TODO(aka) "
                        "%s->getFirstChild() returned NULL.", child_name);
             XMLString::release(&child_name);
             continue;
@@ -2652,7 +2820,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
             DOMNode* sub_child = sub_children->item(idx++);
             if (sub_child == NULL || 
                 sub_child->getNodeType() != DOMNode::ELEMENT_NODE) {
-              logger.Log(LOG_WARN, "conga_parse_xml(): "
+              logger.Log(LOG_WARNING, "conga_parse_xml(): "
                          "TOOD(aka) sub child node either NULL "
                          "or not an ELEMENT_NODE.");
               continue;
@@ -2763,7 +2931,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
             DOMNode* sub_child = sub_children->item(idx++);
             if (sub_child == NULL || 
                 sub_child->getNodeType() != DOMNode::ELEMENT_NODE) {
-              logger.Log(LOG_WARN, "conga_parse_xml(): "
+              logger.Log(LOG_WARNING, "conga_parse_xml(): "
                          "TOOD(aka) sub child node either NULL "
                          "or not an ELEMENT_NODE.");
               continue;
@@ -2869,7 +3037,7 @@ void conga_parse_xml(const ConfInfo& info, const string& xml_msg,
             DOMNode* sub_child = sub_children->item(idx++);
             if (sub_child == NULL || 
                 sub_child->getNodeType() != DOMNode::ELEMENT_NODE) {
-              logger.Log(LOG_WARN, "conga_parse_xml(): "
+              logger.Log(LOG_WARNING, "conga_parse_xml(): "
                          "TOOD(aka) sub child node either NULL "
                          "or not an ELEMENT_NODE.");
               continue;

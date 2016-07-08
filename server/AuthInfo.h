@@ -11,6 +11,8 @@
 #include <string>
 using namespace std;
 
+#include "File.h"        // for PATH_MAX & load/save_state
+
 
 // Non-class specific defines & data structures.
 
@@ -44,6 +46,8 @@ class AuthInfo {
   }
 
   // Accessors & mutators.
+  string print(void) const;
+
   void clear(void) {
     api_key_.clear();
     user_id_.clear();
@@ -52,6 +56,11 @@ class AuthInfo {
     start_time_ = 0;
     end_time_ = 0;
   }
+
+  friend size_t auth_info_list_save_state(const string filename, 
+                                          const list<AuthInfo>& authenticators);
+  friend size_t auth_info_list_load_state(const string filename,
+                                          list<AuthInfo>* authenticators);
 
  protected:
 

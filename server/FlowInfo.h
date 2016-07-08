@@ -28,26 +28,39 @@ class FlowInfo {
   // later when we figure out what we need and don't need.
 
   // Flow details.
-  string allocation_id_;      // unique token for this flow (TODO(aka) should be call flow_id!)
+  string allocation_id_;      // unique token for this flow (TODO(aka)
+                              // should be called flow_id!), but until
+                              // we hear back from the ryu controller,
+                              // its value is ""
+  int meter_;                 // MeterInfo this flow would be managed by
 
   string api_key_;            // API-Key authorizing this flow (maps to AuthInfo)
 
   int bandwidth_;
-  //string expires_in_;
   int duration_;
+  time_t expiration_;            // used internally by conga
 
   string src_ip_;
   in_port_t src_port_;
   string dst_ip_;
   in_port_t dst_port_;
 
-  // TODO(aka) Not sure if we need the two below elements ...
-  string peer_;              // who requested this flow
-  uint16_t msg_hdr_id_;      // link to message (socket) in either to_peers or from_peers
+  time_t polled_;            // flag to show when conga requested flow stats
+  uint16_t peer_;            // who requested this flow
+                             // (TCPSession::handle()), TODO(aka) I'm
+                             // not sure if this is used, i.e.,
+                             // certainly if conga restarts its value
+                             // will be meaningless ...
+
+  //uint16_t msg_hdr_id_;      // link to message (socket) in either to_peers or from_peers  TODO(aka) Not sure if we need this ...
 
   // Constructor & destructor.
   FlowInfo(void) {
-    msg_hdr_id_ = 0;
+    // allocation_id_ is a blank, initial string
+    meter_ = -1;
+    expiration_ = 0;
+    polled_ = 0;
+    peer_ = 0;
   }
 
   virtual ~FlowInfo(void) { };
@@ -55,15 +68,22 @@ class FlowInfo {
   // Copy constructor.
   FlowInfo(const FlowInfo& src)
   : allocation_id_(src.allocation_id_), api_key_(src.api_key_),
-    src_ip_(src.src_ip_), dst_ip_(src.dst_ip_), peer_(src.peer_) {
+    src_ip_(src.src_ip_), dst_ip_(src.dst_ip_) {
+    meter_ = src.meter_;
     bandwidth_ = src.bandwidth_;
-  //expires_in_.clear();
     duration_ = src.duration_;
+    expiration_ = src.expiration_;
+    polled_ = src.polled_;
+    peer_ = src.peer_;
   }
 
   // Accessors & mutators.
   void clear(void);
 
+  friend size_t flow_info_list_save_state(const string filename, 
+                                          const list<FlowInfo>& flows);
+  friend size_t flow_info_list_load_state(const string filename,
+                                          list<FlowInfo>* flows);
  protected:
 
  private:

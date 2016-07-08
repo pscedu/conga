@@ -41,10 +41,13 @@ class ConfInfo {
   bool v4_enabled_;           // flags to show we will use v4
   bool v6_enabled_;           // flags to show we will use v6
   int log_to_stderr_;
-  string census_data_path_;
   bool multi_threaded_;       // flag to enabled multi-threading
   string conf_file_;          // file holding configuration options
-  int duration_;              // how long an AuthInfo should be valid for
+
+  // State vars.
+  string auth_info_list_file_;  // file holding list<AuthInfo> state
+  int duration_;                // how long an AuthInfo should be valid for
+  string flow_info_list_file_;  // file holding list<FlowInfo> state
 
   // For client.  TODO(aka) Not currently used, as we have no client!
   string peer_;

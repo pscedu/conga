@@ -45,6 +45,12 @@ static const ssize_t kDefaultBufSize = TCPSESSION_DEFAULT_BUFSIZE;
 static const int state_poll_interval = 86400;  // 24 hours
 const in_port_t kServerPort = CONGA_SERVER_PORT;
 
+static const int kPollIntervalStatsMeter = 60;       // 1 minute
+static const int kPollIntervalSDNStateReport = 300;  // 5 minutes
+static const int kPollTimeoutStatsFlow = 180;        // 3 minutes
+
+static size_t allocation_id_cnt = 0;
+
 
 // Main event-loop routine: The CONGA server loads & processes
 // some configuration variables and then enters its main event-loop
@@ -57,8 +63,8 @@ int main(int argc, char* argv[]) {
                                      // switches hashed by DPID
   list<MeterInfo> sdn_state;   // current knowlege of SDN flows
   pthread_mutex_t sdn_state_mtx;
-  list<AuthInfo> api_keys;      // credentials currently active
-  pthread_mutex_t api_keys_mtx;
+  list<AuthInfo> authenticators;      // credentials currently active
+  pthread_mutex_t authenticators_mtx;
   list<FlowInfo> flows;         // flows currently active (indexed by AuthInfo)
   pthread_mutex_t flow_list_mtx;
   list<TCPSession> to_peers;    // initated connections (to other nodes)
@@ -91,10 +97,12 @@ int main(int argc, char* argv[]) {
   conf_info.database_db_ = "conga_data";
   conf_info.database_user_ = "conga";
   */
+  conf_info.auth_info_list_file_ = "auth_info_list.json";
+  conf_info.flow_info_list_file_ = "flow_info_list.json";
 
   logger.set_proc_name("conga");
 
-  pthread_mutex_init(&api_keys_mtx, NULL);
+  pthread_mutex_init(&authenticators_mtx, NULL);
   pthread_mutex_init(&flow_list_mtx, NULL);
   pthread_mutex_init(&to_peers_mtx, NULL);
   pthread_mutex_init(&from_peers_mtx, NULL);
@@ -253,8 +261,7 @@ int main(int argc, char* argv[]) {
 
   // Any work prior to the main event loop?
 
-  // Initiate meter state requests ...
-  time_t state_poll_timeout = time(NULL);
+  // Initiate stats/meter state requests ...
   map<string, SwitchInfo>::iterator switch_itr = switches.begin();
   while (switch_itr != switches.end()) {
 #if 0  // For Debugging: end_hosts check
@@ -271,7 +278,8 @@ int main(int argc, char* argv[]) {
 
     // And while we're at it, issue the onetime request for the
     // meters' maximum rates.
-    /*
+
+    /*  XXX re-add!!!
     initiate_stats_meterconfig_request(info, 
                                        switch_itr->first, switch_itr->second,
                                        &ssl_context, &to_peers, &to_peers_mtx);
@@ -279,6 +287,52 @@ int main(int argc, char* argv[]) {
     //curl -X GET http://tango.psc.edu:8080/stats/meterconfig/1229782937975278821
     switch_itr++;
   }
+
+  // Grab existing authenticators.
+  auth_info_list_load_state(conf_info.auth_info_list_file_, &authenticators);
+  allocation_id_cnt =
+      flow_info_list_load_state(conf_info.flow_info_list_file_, &flows);
+
+#if 1  // For Debugging: load state
+  if (authenticators.size() > 0) {
+    list<AuthInfo>::iterator auth_itr = authenticators.begin();
+    string tmp_str(1024, '\0');
+    while (auth_itr != authenticators.end()) {
+      snprintf((char*)tmp_str.c_str() + strlen(tmp_str.c_str()),
+               1024 - strlen(tmp_str.c_str()), "%s (%s:%s:%s:%d)",
+               auth_itr->api_key_.c_str(), auth_itr->user_id_.c_str(), 
+               auth_itr->project_id_.c_str(), auth_itr->resource_id_.c_str(),
+               auth_itr->end_time_);
+      auth_itr++;
+      if (auth_itr != authenticators.end())
+        snprintf((char*)tmp_str.c_str() + strlen(tmp_str.c_str()),
+                 1024 - strlen(tmp_str.c_str()), ", ");
+    }
+    logger.Log(LOG_INFO, "main(): Loaded authenticators: %s.", tmp_str.c_str());
+  }
+  if (flows.size() > 0) {
+    list<FlowInfo>::iterator flow_itr = flows.begin();
+    string tmp_str(1024, '\0');
+    while (flow_itr != flows.end()) {
+      snprintf((char*)tmp_str.c_str() + strlen(tmp_str.c_str()),
+               1024 - strlen(tmp_str.c_str()), "%s (%s:%d:%d:%d:%s:%s)",
+               flow_itr->allocation_id_.c_str(), flow_itr->api_key_.c_str(),
+               flow_itr->meter_, flow_itr->bandwidth_, flow_itr->duration_,
+               flow_itr->src_ip_.c_str(), flow_itr->dst_ip_.c_str());
+      flow_itr++;
+      if (flow_itr != flows.end())
+        snprintf((char*)tmp_str.c_str() + strlen(tmp_str.c_str()),
+                 1024 - strlen(tmp_str.c_str()), ", ");
+    }
+    logger.Log(LOG_INFO, "main(): Loaded flows: %s.", tmp_str.c_str());
+  }
+#endif
+
+  // Setup poll timeout interval(s).
+  time_t stats_meter_poll = time(NULL);
+  time_t sdn_state_report = time(NULL);
+
+  unsigned int debug_print_cnt = 0;  // For Debugging:
 
   // Main event-loop.
   struct pollfd pollfds[TCP_EVENT_MAX_FDS];
@@ -340,71 +394,21 @@ int main(int argc, char* argv[]) {
         //logger.Log(LOG_INFO, "poll() timeout, continuing ...");
 
         time_t now = time(NULL);
-        if (state_poll_timeout <= now) {
-#if 0
-          const string ryu_host = "ryu.psc.edu";
-          TCPSession tmp_session(MsgInfo::HTTP);
-          tmp_session.Init();  // set aside buffer space
-          tmp_session.SSLConn::Init(ryu_host.c_str(), AF_INET, 
-                                    IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
-          tmp_session.set_port(443);
-          tmp_session.set_blocking();
-          tmp_session.Socket(PF_INET, SOCK_STREAM, 0, ssl_context);
-          //tmp_session.set_handle(tmp_session.fd());  // for now, set it to the socket
-          if (error.Event()) {
-            logger.Log(LOG_ERR, "Failed to initialize peer %s:443: %s", 
-                       ryu_host.c_str(), error.print().c_str());
-            error.clear();
-            
-            state_poll_timeout += state_poll_interval;
-            continue;
-          }
 
-          // Build a (HTTP) framing header and load the framing header into
-          // our TCPSession's MsgHdr list.
+        // For Debugging:
+        if (debug_print_cnt++ == 0)
+          logger.Log(LOG_INFO, "main(): TIMEOUT: "
+                     "now: %d, stats/meter poll: %d, sdn state poll: %d, "
+                     "to_peers(%d), sdn_state(%d), flows(%d), "
+                     "authenticators(%d).",
+                     (int)now, (int)stats_meter_poll, (int)sdn_state_report,
+                     (int)to_peers.size(), (int)sdn_state.size(),
+                     (int)flows.size(), (int)authenticators.size());
+        else
+          if (debug_print_cnt == 20)
+            debug_print_cnt = 0;
 
-          URL ryu_url;
-          ryu_url.Init("https", ryu_host.c_str(), 443, NULL, 0, NULL);
-          HTTPFraming http_hdr;
-          http_hdr.InitRequest(HTTPFraming::GET, ryu_url);
-
-          // Add HTTP content-length message-headers (for an empty message-body).
-          struct rfc822_msg_hdr mime_msg_hdr;
-          mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
-          mime_msg_hdr.field_value = "0";
-          http_hdr.AppendMsgHdr(mime_msg_hdr);
-
-          logger.Log(LOG_DEBUGGING, "main(): Generated HTTP headers:\n%s", http_hdr.print_hdr(0).c_str());
-
-          MsgHdr tmp_msg_hdr(MsgHdr::TYPE_HTTP);
-          tmp_msg_hdr.Init(++msg_id_hash, http_hdr);
-
-          // Add our REQUEST message to our outgoing TCPSession list, and go
-          // back to wait for transmission in the event-loop.
-
-          tmp_session.AddMsgBuf(http_hdr.print_hdr(0).c_str(), http_hdr.hdr_len(), 
-                                msg.c_str(), strlen(msg.c_str()), tmp_msg_hdr);
-
-          logger.Log(LOG_VERBOSE, "Sending HTTP REQUEST \'%s\n%s\' to %s.", 
-                     http_hdr.print_start_line().c_str(), 
-                     http_hdr.print_msg_hdrs().c_str(), 
-                     tmp_session.SSLConn::print().c_str());
-
-#if DEBUG_MUTEX_LOCK
-          warnx("main(timeout): requesting to_peers lock.");
-#endif
-          pthread_mutex_lock(&to_peers_mtx);
-          to_peers.push_back(tmp_session);
-#if DEBUG_MUTEX_LOCK
-          warnx("main(timeout): releasing to_peers lock.");
-#endif
-          pthread_mutex_unlock(&to_peers_mtx);
-        }
-#endif
-        state_poll_timeout += state_poll_interval;
-        }  // if (state_poll_timeout <= now) {
-
-        // If any of our *read* data in from_peers is complete, process it ...
+        // TIMEOUT-1: See if any of our *read* data in from_peers is complete.
 #if DEBUG_MUTEX_LOCK
         warnx("main(timeout): requesting from_peers lock.");
 #endif
@@ -445,7 +449,7 @@ int main(int argc, char* argv[]) {
               // Build struct for function arguments.
               struct conga_incoming_msg_args args = {
                 &conf_info, &ssl_context, &sdn_state, &sdn_state_mtx,
-                &api_keys, &api_keys_mtx, 
+                &authenticators, &authenticators_mtx, 
                 &flows, &flow_list_mtx,
                 &to_peers, &to_peers_mtx, from_peer, from_peers.end(), 
                 &thread_list, &thread_list_mtx,
@@ -466,7 +470,7 @@ int main(int argc, char* argv[]) {
               // Process message single threaded.
               conga_process_incoming_msg(&conf_info, &ssl_context,
                                          &sdn_state, &sdn_state_mtx,
-                                         &api_keys, &api_keys_mtx, 
+                                         &authenticators, &authenticators_mtx, 
                                          &flows, &flow_list_mtx,
                                          &to_peers, &to_peers_mtx, from_peer);
               if (error.Event()) {
@@ -511,7 +515,8 @@ int main(int argc, char* argv[]) {
           if (!from_peer->IsConnected() ||  
               (!from_peer->IsOutgoingDataPending() &&
                !from_peer->rbuf_len() && 
-               !from_peer->IsIncomingMsgInitialized())) {
+               !from_peer->IsIncomingMsgInitialized() &&
+               (from_peer->timeout() < now))) {
             // Make sure, if we're multi-threaded, that the thread
             // isn't still running.
 
@@ -540,6 +545,7 @@ int main(int argc, char* argv[]) {
                 from_peer = from_peers.erase(from_peer);
               }
             } else {
+              //printf("XXX IsConnect: %d, IsOutgoingDatapending: %d, rbuf_len: %d, IsIncomingMsgInit: %d.\n", from_peer->IsConnected(), from_peer->IsOutgoingDataPending(), from_peer->rbuf_len(), from_peer->IsIncomingMsgInitialized());
               logger.Log(LOG_DEBUG, "main(timeout): Removing peer %s.", 
                          from_peer->print().c_str());
               from_peer = from_peers.erase(from_peer);
@@ -555,17 +561,17 @@ int main(int argc, char* argv[]) {
           /*
           // TODO(aka) Spot for final check to see if something whet wrong ...
           if (!from_peer->IsIncomingMsgInitialized() && 
-              from_peer->rbuf_len() > 0) {
-            // Something went wrong, report the error and remove the peer.
-            logger.Log(LOG_ERR, "main(): "
-                       "peer (%s) has data in timeout, but not initialized!",
-                       from_peer->print().c_str());
-            from_peer = from_peers.erase(from_peer);
-#if DEBUG_MUTEX_LOCK
-            warnx("main(): releasing from_peers lock.");
-#endif
-            pthread_mutex_unlock(&from_peers_mtx);
-            continue;  // head back to while()
+          from_peer->rbuf_len() > 0) {
+          // Something went wrong, report the error and remove the peer.
+          logger.Log(LOG_ERR, "main(): "
+          "peer (%s) has data in timeout, but not initialized!",
+          from_peer->print().c_str());
+          from_peer = from_peers.erase(from_peer);
+          #if DEBUG_MUTEX_LOCK
+          warnx("main(): releasing from_peers lock.");
+          #endif
+          pthread_mutex_unlock(&from_peers_mtx);
+          continue;  // head back to while()
           } 
           */
 
@@ -577,7 +583,10 @@ int main(int argc, char* argv[]) {
 #endif
         pthread_mutex_unlock(&from_peers_mtx);
 
-        // If any of our *read* data in to_peers is complete, process it ...
+        // TIMEOUT-2: See if any of our *read* data in to_peers is
+        // complete, then see if we have outgoing data ready for
+        // transmission.
+
 #if DEBUG_MUTEX_LOCK
         warnx("main(timeout): requesting to_peers lock.");
 #endif
@@ -620,7 +629,7 @@ int main(int argc, char* argv[]) {
             // Process message single threaded.
             conga_process_incoming_msg(&conf_info, &ssl_context,
                                        &sdn_state, &sdn_state_mtx,
-                                       &api_keys, &api_keys_mtx, 
+                                       &authenticators, &authenticators_mtx, 
                                        &flows, &flow_list_mtx,
                                        &to_peers, &to_peers_mtx, to_peer);
             if (error.Event()) {
@@ -674,7 +683,9 @@ int main(int argc, char* argv[]) {
             } 
           }
 
-          // Finally, see if this peer should be removed.
+          // Finally, see if this peer should be removed.  Note, lack
+          // of to_peer->timeout() check.
+
           if (!to_peer->IsConnected() && 
               !to_peer->IsOutgoingDataPending() &&
               !to_peer->rbuf_len() && 
@@ -698,12 +709,12 @@ int main(int argc, char* argv[]) {
               } else {
                 logger.Log(LOG_DEBUG, "main(timeout): Removing peer %s.",
                            to_peer->print().c_str());
-                to_peer = to_peers.erase(from_peer);
+                to_peer = to_peers.erase(to_peer);
               }
             } else {
               logger.Log(LOG_DEBUG, "main(timeout): Removing peer %s.",
                          to_peer->print().c_str());
-              to_peer = to_peers.erase(from_peer);
+              to_peer = to_peers.erase(to_peer);
             }
 
             // Skip to next peer.
@@ -717,17 +728,17 @@ int main(int argc, char* argv[]) {
           /*
           // TODO(aka) Spot for final check to see if something whet wrong ...
           if (!to_peer->IsIncomingMsgInitialized() && 
-              to_peer->rbuf_len() > 0) {
-            // Something went wrong, report the error and remove the peer.
-            logger.Log(LOG_ERR, "main(): "
-                       "peer (%s) has data in timeout, but not initialized!",
-                       to_peer->print().c_str());
-            to_peer = to_peers.erase(to_peer);
-#if DEBUG_MUTEX_LOCK
-            warnx("main(): releasing to_peers lock.");
-#endif
-            pthread_mutex_unlock(&to_peers_mtx);
-            continue;  // head back to while()
+          to_peer->rbuf_len() > 0) {
+          // Something went wrong, report the error and remove the peer.
+          logger.Log(LOG_ERR, "main(): "
+          "peer (%s) has data in timeout, but not initialized!",
+          to_peer->print().c_str());
+          to_peer = to_peers.erase(to_peer);
+          #if DEBUG_MUTEX_LOCK
+          warnx("main(): releasing to_peers lock.");
+          #endif
+          pthread_mutex_unlock(&to_peers_mtx);
+          continue;  // head back to while()
           } 
           */
 
@@ -737,6 +748,255 @@ int main(int argc, char* argv[]) {
         warnx("main(timeout): releasing to_peers lock.");
 #endif
         pthread_mutex_unlock(&to_peers_mtx);
+
+        // TIMEOUT-3: See if we should request a state update.
+        if (stats_meter_poll <= now) {
+          map<string, SwitchInfo>::iterator switch_itr = switches.begin();
+          while (switch_itr != switches.end()) {
+            initiate_stats_meter_request(conf_info, switch_itr->first, &to_peers,
+                                         &to_peers_mtx);
+            if (error.Event()) {
+              logger.Log(LOG_ERR, "main(timeout): "
+                         "Failed to initialize peer: %s", error.print().c_str());
+              error.clear();
+            }
+            switch_itr++;
+          }
+
+          stats_meter_poll += kPollIntervalStatsMeter;
+        }  // if (stats_meter_poll <= now) {
+
+        // TIMEOUT-4: See if we need to poll for a flow (to learn meter-id).
+#if DEBUG_MUTEX_LOCK
+        warnx("main(timeout): requesting flow list lock.");
+#endif
+        pthread_mutex_lock(&flow_list_mtx);
+        list<FlowInfo>::iterator flow_itr = flows.begin();
+        while (flow_itr != flows.end()) {
+          //printf("XXX checking flow (%s), current meter: %d, polled: %d.\n", flow_itr->allocation_id_.c_str(), flow_itr->meter_, (int)flow_itr->polled_);
+          if (flow_itr->meter_ <= 0 &&
+              (flow_itr->polled_ + kPollTimeoutStatsFlow) <= now) {
+            // Figure out which switch (based on flow's dst) we want to poll.
+            string tmp_dpid;
+            map<string, SwitchInfo>::iterator switch_itr = switches.begin();
+            while (switch_itr != switches.end()) {
+              list<string> end_hosts = switch_itr->second.end_hosts();
+              list<string>::iterator host_itr = end_hosts.begin();
+              while (host_itr != end_hosts.end()) {
+                // Since hosts are dotted-quad, no need to
+                // transform() to lower-case before compare()!
+
+                if (!flow_itr->dst_ip_.compare(*host_itr))
+                  break;
+                host_itr++;
+              }
+              if (host_itr != end_hosts.end()) {
+                // Nice, found the correct switch, so send out our
+                // request to learn the meter-id!
+
+                if (flow_itr->peer_ == 0) {
+                  logger.Log(LOG_WARNING, 
+                             "main(): No peer found for Flow (%s -> %s).",
+                             flow_itr->src_ip_.c_str(),
+                             flow_itr->dst_ip_.c_str());
+                } else {
+                  initiate_stats_flow_request(conf_info, switch_itr->first,
+                                              flow_itr->dst_ip_,
+                                              switch_itr->second,
+                                              &to_peers, &to_peers_mtx);
+                  if (error.Event()) {
+                    logger.Log(LOG_ERR, "main(timeout): "
+                               "Failed to initialize peer: %s",
+                               error.print().c_str());
+                    error.clear();
+                  }
+                  flow_itr->polled_ = now;
+                }
+
+                break;  // leave switch loop and move on to the next flow
+              }  // if (host_itr != end_hosts.end()) {
+
+              switch_itr++;
+            }  // while (switch_itr != switches.end()) {
+          }  // if (flow_itr->allocation_id_.size() <= 0) {
+
+          flow_itr++;
+        }  // while (flow_itr != flows.end()) {
+#if DEBUG_MUTEX_LOCK
+        warnx("main(timeout): releasing flow list lock.");
+#endif
+        pthread_mutex_unlock(&flow_list_mtx);
+
+        // TIMEOUT-5: Check (waiting) flows for meter-ids.
+#if DEBUG_MUTEX_LOCK
+        warnx("main(timeout): requesting flow list lock.");
+#endif
+        pthread_mutex_lock(&flow_list_mtx);
+        flow_itr = flows.begin();
+        while (flow_itr != flows.end()) {
+          if (flow_itr->allocation_id_.size() <= 0 && flow_itr->meter_ > 0) {
+            // Check SDN state for our meter and see if we have bandwidth!
+#if DEBUG_MUTEX_LOCK
+            warnx("main(timeout): requesting sdn_state lock.");
+#endif
+            pthread_mutex_lock(&sdn_state_mtx);
+
+            string tmp_msg(1024, '\0');
+            list<MeterInfo>::iterator meter_itr = sdn_state.begin();
+            while (meter_itr != sdn_state.end()) {
+              if (flow_itr->meter_ == meter_itr->meter_)
+                break;  // found it
+
+              meter_itr++;
+            }
+            if (meter_itr == sdn_state.end()) {
+              logger.Log(LOG_ERR, "main(): "
+                         "Failed to find meter (%d) for Flow (%s -> %s).",
+                         flow_itr->meter_, flow_itr->src_ip_.c_str(),
+                         flow_itr->dst_ip_.c_str());
+              flow_itr++;
+              continue;  // check next flow
+            }
+
+            // See if we have enough bandwidth to fulfill request.
+
+            logger.Log(LOG_WARNING, "main(): TODO(aka) In TIMEOUT-5, we also need to check existing allocations.  It would make sense to add this to MeterInfo, but need to figure out.  Perhaps hashed on expiration?");
+
+            int throughput = 
+                ((int)(meter_itr->byte_in_count_ - 
+                       meter_itr->prev_byte_in_count_) /
+                 (int)(meter_itr->time_ - meter_itr->prev_time_));
+            if (throughput > 0)
+              //printf("XXX meter %d, %db/s based on %lldb (%lld - %lld) in %lds.\n", meter_itr->meter_, throughput, (meter_itr->byte_in_count_ - meter_itr->prev_byte_in_count_), meter_itr->byte_in_count_, meter_itr->prev_byte_in_count_, (meter_itr->time_ - meter_itr->prev_time_));
+
+#if DEBUG_MUTEX_LOCK
+            warnx("main(timeout): releasing sdn_state lock.");
+#endif
+            pthread_mutex_unlock(&sdn_state_mtx);
+
+            logger.Log(LOG_WARNING, "main(): TODO(aka) Need to substract throughput (%d) from rate (unknown) to see if greater than request (%d)!", throughput, flow_itr->bandwidth_);
+
+            string err_msg(1024, '\0');
+            if (1) {  // TODO(aka) if ((throughput + bandwidth) < rate)
+              // Generate a unique allocation id & send it back to requestor.
+              char tmp_buf[64];  // assuming no more than 64 digits
+                                 // (64 bits ~= 20 digits)
+              snprintf(tmp_buf, 64, "%lu", (unsigned long)++allocation_id_cnt);
+              flow_itr->allocation_id_ = tmp_buf;
+              flow_itr->expiration_ = now + flow_itr->duration_;
+              initiate_post_allocation_response(conf_info, *flow_itr, err_msg,
+                                                &from_peers,
+                                                &from_peers_mtx);
+              if (error.Event()) {
+                logger.Log(LOG_ERR, "main(timeout): "
+                           "Failed to intialize response to peer: %s",
+                           error.print().c_str());
+                error.clear();
+              }
+
+              flow_info_list_save_state(conf_info.flow_info_list_file_, flows);
+            } else {
+              // Return rejection and erase flow.
+              snprintf((char*)err_msg.c_str(), 1024, 
+                       "bandwidth > rate - throughput");
+              initiate_post_allocation_response(conf_info, *flow_itr, err_msg,
+                                                &from_peers,
+                                                &from_peers_mtx);
+              if (error.Event()) {
+                logger.Log(LOG_ERR, "main(timeout): "
+                           "Failed to intialize response to peer: %s",
+                           error.print().c_str());
+                error.clear();
+              }
+
+              flow_itr = flows.erase(flow_itr);
+              flow_info_list_save_state(conf_info.flow_info_list_file_, flows);
+              continue;
+            }
+          }  // if (flow_itr->allocation_id_.size() <= 0 && flow_itr->meter_ > 0) {
+
+          flow_itr++;
+        }  // while (flow_itr != flows.end()) {
+#if DEBUG_MUTEX_LOCK
+        warnx("main(timeout): releasing flow list lock.");
+#endif
+        pthread_mutex_unlock(&flow_list_mtx);
+
+        // TIMEOUT-6: Kill off expired authenticators & flows.
+#if DEBUG_MUTEX_LOCK
+        warnx("main(timeout): requesting authenticators lock.");
+#endif
+        pthread_mutex_lock(&authenticators_mtx);
+
+        list<AuthInfo>::iterator auth_itr = authenticators.begin();
+        while (auth_itr != authenticators.end()) {
+          if (auth_itr->end_time_ < now) {
+            auth_itr = authenticators.erase(auth_itr);
+          } else {
+            auth_itr++;
+          }
+        }
+
+#if DEBUG_MUTEX_LOCK
+        warnx("main(timeout): releasing authenticators lock.");
+#endif
+        pthread_mutex_unlock(&authenticators_mtx);
+
+        // XXX TODO(aka) How do we verify a flow stopped?
+
+        // TIMEOUT-7: Report switch throughputs.
+        if (sdn_state_report <= now) {
+#if DEBUG_MUTEX_LOCK
+          warnx("main(timeout): requesting sdn_state lock.");
+#endif
+          pthread_mutex_lock(&sdn_state_mtx);
+
+          string tmp_msg(1024, '\0');
+          list<MeterInfo>::iterator meter_itr = sdn_state.begin();
+          while (meter_itr != sdn_state.end()) {
+            // Skip meters that have not updated in a while.
+            if (meter_itr->time_ < (now - (kPollIntervalStatsMeter * 3))) {
+              printf("XXX Skipping %d, time: %d < %d (now (%d) - 3 * Poll (%d)).\n", meter_itr->meter_, (int)meter_itr->time_, (int)(now - (kPollIntervalStatsMeter * 3)), (int)now, (int)(kPollIntervalStatsMeter * 3));
+              meter_itr++;
+              continue;
+            }
+
+            int throughput = 
+                ((int)(meter_itr->byte_in_count_ - 
+                       meter_itr->prev_byte_in_count_) /
+                 (int)(meter_itr->time_ - meter_itr->prev_time_));
+            if (throughput > 0)
+              printf("XXX meter %d, %db/s based on %lldb (%lld - %lld) in %lds.\n", meter_itr->meter_, throughput, (meter_itr->byte_in_count_ - meter_itr->prev_byte_in_count_), meter_itr->byte_in_count_, meter_itr->prev_byte_in_count_, (meter_itr->time_ - meter_itr->prev_time_));
+
+            snprintf((char*)tmp_msg.c_str() + strlen(tmp_msg.c_str()), 
+                     1024 - strlen(tmp_msg.c_str()),
+                     "Meter %d (dpid: %s) throughput: %d (%s)", 
+                     meter_itr->meter_, meter_itr->dpid_.c_str(),
+                     throughput, meter_itr->flag_rate_.c_str());
+            meter_itr++;
+            if (meter_itr == sdn_state.end())
+              snprintf((char*)tmp_msg.c_str() + strlen(tmp_msg.c_str()), 
+                       1024 - strlen(tmp_msg.c_str()), ".");
+            else 
+              snprintf((char*)tmp_msg.c_str() + strlen(tmp_msg.c_str()), 
+                       1024 - strlen(tmp_msg.c_str()), ", ");
+          }
+
+          logger.Log(LOG_NOTICE, "%s", tmp_msg.c_str());
+
+#if DEBUG_MUTEX_LOCK
+          warnx("main(timeout): releasing sdn_state lock.");
+#endif
+          pthread_mutex_unlock(&sdn_state_mtx);
+          sdn_state_report += kPollIntervalSDNStateReport;
+        }  // if (sdn_state_report <= now) {
+
+        // TIMEOUT-8: Clean-up.
+
+        // XXX TODO(aka) In short, we need to check each meter, and if
+        // it wasn't updated (look at time & prev_time), then we
+        // should remove it from the sdn state!
+
       } catch (...) {
         logger.Log(LOG_ERR, "main(): "
                    "Unexpected exception thrown during TIMEOUT proccessing.");
