@@ -180,9 +180,9 @@ int main(int argc, char* argv[]) {
                      SSL_OP_CIPHER_SERVER_PREFERENCE);
   else
     ssl_context.Init(TLSv1_method(), server_id,
-                     "limbo.psc.edu.key.pem", "/home/pscnoc/conga/certs",
+                     "limbo.psc.edu.key.pem", "./certs",
                      SSL_FILETYPE_PEM, NULL, 
-                     "limbo.psc.edu.crt.pem", "/home/pscnoc/conga/certs",
+                     "limbo.psc.edu.crt.pem", "./certs",
                      SSL_FILETYPE_PEM, NULL, NULL,
                      SSL_VERIFY_NONE, 2, SSL_SESS_CACHE_OFF,
                      SSL_OP_CIPHER_SERVER_PREFERENCE);
