@@ -1158,7 +1158,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
     snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ { "
              "\"%s\":\"%s\", "
              "\"%s\": %d, \"%s\": %d, "
-             "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
+             "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\" " // BDL - removed trailing comma
              "} ] }", 
              status, kDetailAPIKey, api_key_itr->api_key_.c_str(), 
              kDetailStartTime, api_key_itr->start_time_, 
@@ -1192,7 +1192,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
              "{ \"status\":%d, \"results\": [ { "
              "\"%s\":\"%s\", "
              "\"%s\": %d, \"%s\": %d, "
-             "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
+             "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\" " //BDL - removed trailing comma
              "} ] }", 
              status, kDetailAPIKey, new_key.api_key_.c_str(), 
              kDetailStartTime, new_key.start_time_, 
@@ -1734,7 +1734,7 @@ string conga_process_delete_allocations(const ConfInfo& info,
     // Build response.
     snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1,
              "{ \"status\":%d, \"results\": [ { "
-             "\"%s\":\"%s\", "
+             "\"%s\":\"%s\" " //BDL - removed trailing comma
              "} ] \"errors\":\"%s\" }", 
              status,
              kDetailAllocationID, allocation_id.c_str(),
@@ -1752,7 +1752,7 @@ string conga_process_delete_allocations(const ConfInfo& info,
     // Build response.
     snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1,
              "{ \"status\":%d, \"results\": [ { "
-             "\"%s\":\"%s\", "
+             "\"%s\":\"%s\" "	//BDL - removed trailing comma
              "} ] \"errors\": [ ] }", 
              status,
              kDetailAllocationID, our_flow.allocation_id_.c_str());
@@ -1912,7 +1912,7 @@ string conga_process_get_allocations(const ConfInfo& info,
              "\"%s\":\"%s\", \"%s\":\"%s\", "
              "\"%s\":\"%s\", \"%s\":%d, "
              "\"%s\":\"%s\", \"%s\":%d, "
-             "\"%s\":%d, "
+             "\"%s\":%d " //BDL - removed trailing comma
              "} ] }", 
              status,
              kDetailAllocationID, our_flow.allocation_id_.c_str(),
