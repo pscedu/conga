@@ -17,7 +17,7 @@ using namespace std;
 #include "FlowInfo.h"
 
 // CONGAd.
-#define SERVER_VERSION "0.9.2"
+#define SERVER_VERSION "0.9.3"
 #define CONF_FILE_DELIMITER '='
 
 // Networking definitions.
