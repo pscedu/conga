@@ -3,6 +3,7 @@ rapidjson
 ssl-conn-test*
 ref-count-test*
 certs
-server/conga
 conga.log
 *.o
+*.json
+*.trace

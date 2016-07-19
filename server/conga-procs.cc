@@ -1158,7 +1158,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
     snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1, "{ \"status\":%d, \"results\": [ { "
              "\"%s\":\"%s\", "
              "\"%s\": %d, \"%s\": %d, "
-             "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
+             "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\""
              "} ] }", 
              status, kDetailAPIKey, api_key_itr->api_key_.c_str(), 
              kDetailStartTime, api_key_itr->start_time_, 
@@ -1192,7 +1192,7 @@ string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr
              "{ \"status\":%d, \"results\": [ { "
              "\"%s\":\"%s\", "
              "\"%s\": %d, \"%s\": %d, "
-             "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
+             "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\""
              "} ] }", 
              status, kDetailAPIKey, new_key.api_key_.c_str(), 
              kDetailStartTime, new_key.start_time_, 
@@ -1292,7 +1292,7 @@ string conga_process_delete_auth(const ConfInfo& info,
   // Build the response.
   snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1,
            "{ \"status\":%d, \"results\": [ { "
-           "\"%s\":\"%s\", "
+           "\"%s\":\"%s\""
            "} ] }", 
            status, kDetailAPIKey, api_key.c_str());
 
@@ -1390,7 +1390,7 @@ string conga_process_get_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
            "{ \"status\":%d, \"results\": [ { "
            "\"%s\":\"%s\", "
            "\"%s\": %d, \"%s\": %d, "
-           "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\", "
+           "\"%s\":\"%s\", \"%s\":\"%s\", \"%s\":\"%s\""
            "} ] }", 
            status, kDetailAPIKey, api_key_itr->api_key_.c_str(), 
            kDetailStartTime, api_key_itr->start_time_, 
@@ -1734,7 +1734,7 @@ string conga_process_delete_allocations(const ConfInfo& info,
     // Build response.
     snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1,
              "{ \"status\":%d, \"results\": [ { "
-             "\"%s\":\"%s\", "
+             "\"%s\":\"%s\""
              "} ] \"errors\":\"%s\" }", 
              status,
              kDetailAllocationID, allocation_id.c_str(),
@@ -1752,7 +1752,7 @@ string conga_process_delete_allocations(const ConfInfo& info,
     // Build response.
     snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1,
              "{ \"status\":%d, \"results\": [ { "
-             "\"%s\":\"%s\", "
+             "\"%s\":\"%s\""
              "} ] \"errors\": [ ] }", 
              status,
              kDetailAllocationID, our_flow.allocation_id_.c_str());
@@ -1912,7 +1912,7 @@ string conga_process_get_allocations(const ConfInfo& info,
              "\"%s\":\"%s\", \"%s\":\"%s\", "
              "\"%s\":\"%s\", \"%s\":%d, "
              "\"%s\":\"%s\", \"%s\":%d, "
-             "\"%s\":%d, "
+             "\"%s\":%d"
              "} ] }", 
              status,
              kDetailAllocationID, our_flow.allocation_id_.c_str(),
@@ -1936,12 +1936,13 @@ string conga_process_get_allocations(const ConfInfo& info,
     int status = 0;  // TODO(aka) how do we update status if something fails below?
 
     snprintf((char*)ret_msg.c_str(), kHTTPMsgBodyMaxSize - 1,
-             "{ \"status\":%d, \"results\": [ ", status);
+             "{\"status\":%d, \"results\": [", status);
 
     // Loop over all flows that use our API key ...
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_get_allocations: requesting flow list lock.");
 #endif
+    bool existing_element = false;
     pthread_mutex_lock(flow_list_mtx);
     list<FlowInfo>::iterator flow_itr = flows->begin();
     while (flow_itr != flows->end()) {
@@ -1954,15 +1955,20 @@ string conga_process_get_allocations(const ConfInfo& info,
         string state = "running";
 
         // Add flow info to response message.
+        if (existing_element)
+          snprintf((char*)ret_msg.c_str() + strlen(ret_msg.c_str()),
+                   (kHTTPMsgBodyMaxSize - 1) - strlen(ret_msg.c_str()),
+                   ", ");  // add JSON element separater
+
         snprintf((char*)ret_msg.c_str() + strlen(ret_msg.c_str()),
                  (kHTTPMsgBodyMaxSize - 1) - strlen(ret_msg.c_str()),
-                 "{ \"%s\":\"%s\", "
+                 "{\"%s\":\"%s\", "
                  "\"%s\":\"%s\", "
                  "\"%s\":%d, "
                  "\"%s\":\"%s\", \"%s\":\"%s\", "
                  "\"%s\":\"%s\", \"%s\":%d, "
                  "\"%s\":\"%s\", \"%s\":%d, "
-                 "\"%s\":%d, }, ",
+                 "\"%s\":%d}",
                  kDetailAllocationID, flow_itr->allocation_id_.c_str(),
                  kDetailState, state.c_str(), 
                  kDetailBandwidth, flow_itr->bandwidth_,
@@ -1973,13 +1979,14 @@ string conga_process_get_allocations(const ConfInfo& info,
                  kDetailDstIP, flow_itr->dst_ip_.c_str(),
                  kDetailDstPort, flow_itr->dst_port_,
                  kDetailDuration, flow_itr->duration_);
+        existing_element = true;
       }
 
       flow_itr++;
     }  // while (flow_itr != flows->end()) {
 
     snprintf((char*)ret_msg.c_str() + strlen(ret_msg.c_str()),
-             (kHTTPMsgBodyMaxSize - 1) - strlen(ret_msg.c_str()), "] }");
+             (kHTTPMsgBodyMaxSize - 1) - strlen(ret_msg.c_str()), "]}");
 
 #if DEBUG_MUTEX_LOCK
     warnx("conga_process_get_allocations: releasing flow list lock.");
