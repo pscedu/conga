@@ -4,6 +4,7 @@ ssl-conn-test*
 ref-count-test*
 certs
 conga.log
+conga.out
 *.o
 *.json
 *.trace
