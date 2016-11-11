@@ -23,8 +23,9 @@ class MeterInfo {
   int meter_;                 // meter id; this and dpid_ value make it unique
   string dpid_;               // switch this meter is configured on
   string flow_;               // unused; TODO(aka) not sure if we need this
+  int flow_count_;            // the number of flows assigned to this meter
   uint64_t rate_;             // max rate (threshold, I think)
-  string flag_rate_;          // rate reported in rate (I think)
+  string flag_rate_;          // rate type (e.g., KBPS) reported for rate above
   time_t time_;               // moment stats were populated in Class
   uint64_t byte_band_count_;  // bytes seen that are over threshold (I think)
   uint64_t byte_in_count_;    // bytes seen
@@ -37,6 +38,7 @@ class MeterInfo {
    */
   MeterInfo(void) {
     meter_ = -1;
+    flow_count_ = 0;
     rate_ = 0;
     time_ = 0;
     byte_band_count_ = 0;
@@ -66,6 +68,7 @@ class MeterInfo {
   MeterInfo(const MeterInfo& src)
   : dpid_(src.dpid_), flow_(src.flow_), flag_rate_(src.flag_rate_) {
     meter_ = src.meter_;
+    flow_count_ = src.flow_count_;
     rate_ = src.rate_;
     time_ = src.time_;
     byte_band_count_ = src.byte_band_count_;

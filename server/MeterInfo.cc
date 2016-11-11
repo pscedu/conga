@@ -18,6 +18,7 @@
 // Mutators.
 void MeterInfo::clear(void) {
   meter_ = -1;
+  flow_count_ = 0;
   dpid_.clear();
   flow_.clear();
   rate_ = 0;

@@ -32,11 +32,11 @@ class FlowInfo {
                               // should be called flow_id!), but until
                               // we hear back from the ryu controller,
                               // its value is ""
-  int meter_;                 // MeterInfo this flow would be managed by
+  int meter_;                 // MeterInfo meter_ this flow would be managed by
 
   string api_key_;            // API-Key authorizing this flow (maps to AuthInfo)
 
-  int bandwidth_;
+  int rate_;
   int duration_;
   time_t expiration_;            // used internally by conga
 
@@ -47,9 +47,8 @@ class FlowInfo {
 
   time_t polled_;            // flag to show when conga requested flow stats
   uint16_t peer_;            // who requested this flow
-                             // (TCPSession::handle()), TODO(aka) I'm
-                             // not sure if this is used, i.e.,
-                             // certainly if conga restarts its value
+                             // (TCPSession::handle()), TODO(aka)
+                             // Note, if conga restarts this value
                              // will be meaningless ...
 
   //uint16_t msg_hdr_id_;      // link to message (socket) in either to_peers or from_peers  TODO(aka) Not sure if we need this ...
@@ -58,7 +57,11 @@ class FlowInfo {
   FlowInfo(void) {
     // allocation_id_ is a blank, initial string
     meter_ = -1;
+
+    rate_ = 0;
+    duration_ = 0;
     expiration_ = 0;
+
     polled_ = 0;
     peer_ = 0;
   }
@@ -70,7 +73,7 @@ class FlowInfo {
   : allocation_id_(src.allocation_id_), api_key_(src.api_key_),
     src_ip_(src.src_ip_), dst_ip_(src.dst_ip_) {
     meter_ = src.meter_;
-    bandwidth_ = src.bandwidth_;
+    rate_ = src.rate_;
     duration_ = src.duration_;
     expiration_ = src.expiration_;
     polled_ = src.polled_;

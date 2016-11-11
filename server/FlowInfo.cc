@@ -24,7 +24,7 @@ static const char* kNameFlows = "flows";
 static const char* kNameAllocationID = "allocation-id";
 static const char* kNameMeter = "meter";
 static const char* kNameAPIKey = "key";
-static const char* kNameBandwidth = "bandwidth";
+static const char* kNameRate = "rate";
 static const char* kNameDuration = "duration";
 static const char* kNameExpiration = "expires";
 static const char* kNameSrcIP = "src-ip";
@@ -52,7 +52,7 @@ size_t flow_info_list_save_state(const string filename,
     snprintf(tmp_buf + strlen(tmp_buf), PATH_MAX - strlen(tmp_buf),
              "\"%s\":%d, ", kNameMeter, itr->meter_);
     snprintf(tmp_buf + strlen(tmp_buf), PATH_MAX - strlen(tmp_buf),
-             "\"%s\":%d, ", kNameBandwidth, itr->bandwidth_);
+             "\"%s\":%d, ", kNameRate, itr->rate_);
     snprintf(tmp_buf + strlen(tmp_buf), PATH_MAX - strlen(tmp_buf),
              "\"%s\":%d, ", kNameDuration, itr->duration_);
     snprintf(tmp_buf + strlen(tmp_buf), PATH_MAX - strlen(tmp_buf),
@@ -156,7 +156,7 @@ size_t flow_info_list_load_state(const string filename,
     if (!list[i].HasMember(kNameAllocationID) || 
         !list[i].HasMember(kNameAPIKey) || 
         !list[i].HasMember(kNameMeter) ||
-        !list[i].HasMember(kNameBandwidth) ||
+        !list[i].HasMember(kNameRate) ||
         !list[i].HasMember(kNameDuration) ||
         !list[i].HasMember(kNameExpiration) ||
         !list[i].HasMember(kNameSrcIP) ||
@@ -168,7 +168,7 @@ size_t flow_info_list_load_state(const string filename,
     tmp_flow.allocation_id_ = list[i][kNameAllocationID].GetString();
     tmp_flow.api_key_ = list[i][kNameAPIKey].GetString();
     tmp_flow.meter_ = list[i][kNameMeter].GetInt();
-    tmp_flow.bandwidth_ = list[i][kNameBandwidth].GetInt();
+    tmp_flow.rate_ = list[i][kNameRate].GetInt();
     tmp_flow.duration_ = list[i][kNameDuration].GetInt();
     tmp_flow.expiration_ = (time_t)list[i][kNameExpiration].GetInt();
     tmp_flow.src_ip_ = list[i][kNameSrcIP].GetString();
@@ -203,7 +203,7 @@ void FlowInfo::clear(void) {
 
   api_key_.clear();
 
-  bandwidth_ = 0;
+  rate_ = 0;
   duration_ = 0;
   expiration_ = 0;
 

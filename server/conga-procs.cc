@@ -71,7 +71,7 @@ static const char* kDetailDstPort = "dst_port";
 static const char* kDetailStartTime = "start_time";
 static const char* kDetailEndTime = "end_time";
 static const char* kDetailDuration = "duration";
-static const char* kDetailBandwidth = "bandwidth";
+static const char* kDetailRate = "rate";
 
 static const char* kDetailIsActive = "is_active";
 
@@ -80,6 +80,7 @@ static const size_t kAPIKeySize = 16;
 // RYU elements.
 static const char* kNameActions = "actions";
 static const char* kNameMeterID = "meter_id";
+static const char* kNameFlowCount = "flow_count";
 static const char* kNameBandStats = "band_stats";
 static const char* kNameBands = "bands";
 static const char* kNameFlags = "flags";
@@ -88,6 +89,12 @@ static const char* kNameByteBandCount = "byte_band_count";
 static const char* kNameByteInCount = "byte_in_count";
 static const char* kNameMatch = "match";
 static const char* kNameNwDst = "nw_dst";
+
+static const char* kRyuControllerName = "tango.psc.edu";
+static const in_port_t kRyuControllerPort = 8080;
+static const char* kRyuQueryStats = "stats";
+static const char* kRyuQueryFlowentry = "flowentry";
+static const char* kRyuQueryModify = "modify";
 
 // Routine to process a ready (incoming) message in our TCPSession
 // object.  This routine must deal with both the message framing *and*
@@ -521,7 +528,7 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                                         "Array", "String", "Number" };
 #endif
 
-    printf("XXX parsing: %s.\n", msg_body.c_str());
+    //printf("XXX DEBUG: parsing: %s.\n", msg_body.c_str());
     // Parse JSON message-body.
     rapidjson::Document response;
     if (response.Parse(msg_body.c_str()).HasParseError()) {
@@ -712,6 +719,17 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
 
       tmp_meter.meter_ = dpid[i][kNameMeterID].GetInt();
 
+      if (dpid[i].HasMember(kNameFlowCount)) {
+        if (!dpid[i][kNameFlowCount].IsNumber()) {
+          logger.Log(LOG_INFO, "conga_process_response(): "
+                     "%s in unknown type in JSON from %s: %s",
+                     kNameFlowCount, peer->hostname().c_str(),
+                     msg_body.c_str());
+          continue;
+        }
+        tmp_meter.flow_count_ = dpid[i][kNameFlowCount].GetInt();
+      }
+
       if (dpid[i].HasMember(kNameByteInCount)) {
         // Make sure it's a number.
         if (!dpid[i][kNameByteInCount].IsNumber()) {
@@ -770,6 +788,7 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
                          msg_body.c_str());
               continue;
             }
+
             tmp_meter.rate_ = (uint64_t)bands[j][kNameRate].GetInt64();
           }
         }
@@ -785,29 +804,25 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
           continue;
         }
 
-        // Grab elements, hopefully one is a rate classification.
+        // Grab elements, hopefully one is a rate classification type.
         for (rapidjson::SizeType j = 0; j < flags.Size(); ++j) {
-          if (flags[j].HasMember(kNameRate)) {
-            if (!flags[j].IsString()) {
-              logger.Log(LOG_WARNING, "conga_process_response(): "
-                         "flags[%d] is not a string in JSON from %s: %s",
-                         j, peer->hostname().c_str(),
-                         msg_body.c_str());
-              continue;
-            }
-
-            string tmp_flag = flags[j].GetString();
-
-            // And let's skip "STATS".
-            if (!tmp_flag.compare("STATS"))
-              tmp_meter.flag_rate_ = tmp_flag;  // TODO(aka)
-                                                // technically if
-                                                // something other
-                                                // than a rate or
-                                                // STATS is in here,
-                                                // we could get
-                                                // overwritten!
+          if (!flags[j].IsString()) {
+            logger.Log(LOG_WARNING, "conga_process_response(): "
+                       "flags[%d] is not a string in JSON from %s: %s",
+                       j, peer->hostname().c_str(),
+                       msg_body.c_str());
+            continue;
           }
+
+          string tmp_flag = flags[j].GetString();
+
+          // And let's skip "STATS".
+          if (!tmp_flag.compare("STATS"))
+            tmp_meter.flag_rate_ = tmp_flag;  // TODO(aka) technically
+                                              // if something other
+                                              // than a rate or STATS
+                                              // is in here, we could
+                                              // get overwritten!
         }
       }  // if (dpid[i].HasMember(kNameFlags)) {
 
@@ -817,8 +832,10 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
 #endif
       pthread_mutex_lock(sdn_state_mtx);
 
+      //printf("XXX Parsed meter %d from %s.\n", tmp_meter.meter_, tmp_meter.dpid_.c_str());
       list<MeterInfo>::iterator meter_itr = sdn_state->begin();
       while (meter_itr != sdn_state->end()) {
+        //printf("XXX Comparing the above to exising: %d, %s.\n", meter_itr->meter_, meter_itr->dpid_.c_str());
         if (!tmp_meter.dpid_.compare(meter_itr->dpid_) 
             && tmp_meter.meter_ == meter_itr->meter_)
           break;  // found our meter
@@ -828,12 +845,19 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
         // Add new entry to our SDN state.
         tmp_meter.time_ = time(NULL);
         sdn_state->push_back(tmp_meter);
-        logger.Log(LOG_NOTICE, "Added new meter %d from %s, bytes in: %lld",
+        logger.Log(LOG_NOTICE, "Added new meter (%d) from %s, "
+                   "rate: %lu, bytes in: %lld",
                    tmp_meter.meter_, tmp_meter.dpid_.c_str(),
-                   tmp_meter.byte_in_count_);
+                   (unsigned long)tmp_meter.rate_, tmp_meter.byte_in_count_);
       } else {
         // Update our SDN state.
-        meter_itr->rate_ = tmp_meter.rate_;
+        if (tmp_meter.rate_ > meter_itr->rate_) {
+          logger.Log(LOG_NOTICE, "Updating meter (%d) from %s with rate: %lu",
+                     tmp_meter.meter_, tmp_meter.dpid_.c_str(),
+                     (unsigned long)tmp_meter.rate_);
+          meter_itr->rate_ = tmp_meter.rate_;  // TODO(aka): Minor HACK
+        }
+        meter_itr->flow_count_ = tmp_meter.flow_count_;
         meter_itr->prev_time_ = meter_itr->time_;
         meter_itr->prev_byte_band_count_ = meter_itr->byte_band_count_;
         meter_itr->prev_byte_in_count_ = meter_itr->byte_in_count_;
@@ -898,6 +922,8 @@ void conga_process_response(const ConfInfo& info, const MsgHdr& msg_hdr,
 // Process requests based on RESTful API.
 
 // Routine to authorize a user for a future flow generation.
+//
+// Note, this routine blocks on the waiting HTTP response.
 string conga_process_post_auth(const ConfInfo& info, const HTTPFraming& http_hdr,
                                const string& msg_body, const File& msg_data,
                                SSLContext* ssl_context,
@@ -1470,7 +1496,7 @@ string conga_process_post_allocations(const ConfInfo& info,
     error.Init(EX_DATAERR, "conga_process_post_allocations(): TODO(aka) "
                "%s, %s, %s, %s or %s is invalid: %s", 
                kDetailAPIKey, kDetailProjectID, 
-               kDetailSrcIP, kDetailDstIP, kDetailDuration, msg_body.c_str());
+               kDetailSrcIP, kDetailDstIP, kDetailRate, msg_body.c_str());
     return "";
   } 
 
@@ -1561,21 +1587,20 @@ string conga_process_post_allocations(const ConfInfo& info,
     warnx("conga_process_post_allocations: releasing flow list lock.");
 #endif
     pthread_mutex_unlock(flow_list_mtx);
-#endif
+#endif  // #if 0
 
     return "";
-  } 
+  }  // if (allocation_id.size() > 0) {
 
   // This is an instantiation request, sanity check we have the
   // necessary attributes.
 
   if (!details.HasMember(kDetailSrcIP) || !details[kDetailSrcIP].IsString() ||
       !details.HasMember(kDetailDstIP) || !details[kDetailDstIP].IsString() ||
-      !details.HasMember(kDetailDuration) ||
-      !details[kDetailDuration].IsInt()) {
+      !details.HasMember(kDetailRate) || !details[kDetailRate].IsInt()) {
     error.Init(EX_DATAERR, "conga_process_post_allocations(): "
                "%s, %s or %s is invalid: %s", 
-               kDetailSrcIP, kDetailDstIP, kDetailDuration,
+               kDetailSrcIP, kDetailDstIP, kDetailRate,
                msg_body.c_str());
     return "";
   }
@@ -1590,7 +1615,7 @@ string conga_process_post_allocations(const ConfInfo& info,
   new_flow.api_key_ = details[kDetailAPIKey].GetString();
   new_flow.src_ip_ = details[kDetailSrcIP].GetString();
   new_flow.dst_ip_ = details[kDetailDstIP].GetString();
-  new_flow.duration_ = details[kDetailDuration].GetInt();
+  new_flow.rate_ = details[kDetailRate].GetInt();
   new_flow.peer_ = peer->handle();
 
   // See what else we have ...
@@ -1598,6 +1623,12 @@ string conga_process_post_allocations(const ConfInfo& info,
     new_flow.src_port_ = details[kDetailSrcPort].GetInt();
   if (details.HasMember(kDetailDstPort) && details[kDetailDstPort].IsInt())
     new_flow.dst_port_ = details[kDetailDstPort].GetInt();
+  if (details.HasMember(kDetailDuration) && details[kDetailDuration].IsInt())
+    new_flow.duration_ = details[kDetailDuration].GetInt();
+
+  // TODO(aka): HACK if duration is not set in allocation request!
+  new_flow.duration_ =
+      (new_flow.duration_ > 0) ? new_flow.duration_ : info.duration_;
 
 #if DEBUG_MUTEX_LOCK
   warnx("conga_process_post_allocations: requesting flow list lock.");
@@ -1618,7 +1649,7 @@ string conga_process_post_allocations(const ConfInfo& info,
              kDetailAPIKey, new_flow.api_key_.c_str(),
              kDetailSrcIP, new_flow.src_ip_.c_str(),
              kDetailDstIP, new_flow.dst_ip_.c_str(),
-             kDetailDuration, new_flow.duration_,
+             kDetailRate, new_flow.rate_,
              peer->hostname().c_str(), new_flow.peer_);
   
   return "";  // head back to main event-loop
@@ -1817,7 +1848,7 @@ string conga_process_get_allocations(const ConfInfo& info,
     error.Init(EX_DATAERR, "conga_process_get_allocations(): TODO(aka) "
                "%s, %s, %s, %s or %s is invalid: %s", 
                kDetailAPIKey, kDetailProjectID, 
-               kDetailSrcIP, kDetailDstIP, kDetailDuration, msg_body.c_str());
+               kDetailSrcIP, kDetailDstIP, kDetailRate, msg_body.c_str());
     return "";
   } 
 
@@ -1917,14 +1948,14 @@ string conga_process_get_allocations(const ConfInfo& info,
              status,
              kDetailAllocationID, our_flow.allocation_id_.c_str(),
              kDetailState, state.c_str(), 
-             kDetailBandwidth, our_flow.bandwidth_,
+             kDetailRate, our_flow.rate_,
              kDetailUserID, our_auth.user_id_.c_str(),
              kDetailProjectID, our_auth.project_id_.c_str(),
              kDetailSrcIP, our_flow.src_ip_.c_str(),
              kDetailSrcPort, our_flow.src_port_,
              kDetailDstIP, our_flow.dst_ip_.c_str(),
              kDetailDstPort, our_flow.dst_port_,
-             kDetailDuration, our_flow.duration_);
+             kDetailRate, our_flow.rate_);
 
     logger.Log(LOG_NOTICE, "Processed GET allocations (%s:%s, %s:%s) from %s.",
                kDetailAllocationID, our_flow.allocation_id_.c_str(),
@@ -1971,14 +2002,14 @@ string conga_process_get_allocations(const ConfInfo& info,
                  "\"%s\":%d}",
                  kDetailAllocationID, flow_itr->allocation_id_.c_str(),
                  kDetailState, state.c_str(), 
-                 kDetailBandwidth, flow_itr->bandwidth_,
+                 kDetailRate, flow_itr->rate_,
                  kDetailUserID, our_auth.user_id_.c_str(),
                  kDetailProjectID, our_auth.project_id_.c_str(),
                  kDetailSrcIP, flow_itr->src_ip_.c_str(),
                  kDetailSrcPort, flow_itr->src_port_,
                  kDetailDstIP, flow_itr->dst_ip_.c_str(),
                  kDetailDstPort, flow_itr->dst_port_,
-                 kDetailDuration, flow_itr->duration_);
+                 kDetailRate, flow_itr->rate_);
         existing_element = true;
       }
 
@@ -2001,6 +2032,197 @@ string conga_process_get_allocations(const ConfInfo& info,
 
   // Head back to conga_process_incoming_msg() to send RESPONSE out.
   return ret_msg;
+}
+
+// Routine to assign (or request) a meter be assigned to a flow.
+//
+// Note, this routine blocks on the waiting HTTP response.
+size_t conga_request_stats_flowentry_modify(const ConfInfo& info,
+                                            const string& dpid,
+                                            const SwitchInfo& controller, 
+                                            const MeterInfo& meter,
+                                            const time_t now,
+                                            size_t allocation_id_cnt,
+                                            SSLContext* ssl_context,
+                                            list<FlowInfo>::iterator flow_itr) {
+  // Setup a client connection to the Ryu controller.
+  TCPSession tmp_session(MsgHdr::TYPE_HTTP);
+  tmp_session.Init();  // set aside buffer space
+  tmp_session.SSLConn::Init(kRyuControllerName, AF_INET, 
+                            IPCOMM_DNS_RETRY_CNT);  // init IPComm base class
+  tmp_session.set_port(kRyuControllerPort);
+  tmp_session.set_blocking();
+  tmp_session.Socket(PF_INET, SOCK_STREAM, 0, NULL);
+  if (error.Event()) {
+    error.AppendMsg("conga_request_stats_flowentry_modify():");
+    return allocation_id_cnt;
+  }
+
+  // Build a (HTTP) framing header and load the framing header into
+  // our TCPSession's MsgHdr list.  Sample request:
+  //
+  // 0000: POST /stats/flowentry/modify HTTP/1.1
+  // 0027: Host: tango.psc.edu:8080
+  // 0041: User-Agent: curl/7.43.0
+  // 005a: Accept: */*
+  // 0067: Content-Length: 384
+  // 007c: Content-Type: application/x-www-form-urlencoded
+  // 00ad: 
+  // => Send data, 384 bytes (0x180)
+  // 0000: {"dpid": 1229782937975278821, "table_id": 30, "idle_timeout": 0,
+  // 0040:  "hard_timeout": 0, "priority": 100, "flags": 0, "match":{"eth_t
+  // 0080: ype": 2048, "vlan_vid": 4010,  "nw_dst":"10.10.4.20", "priority"
+  // 00c0: :100 }, "actions":[{ "type": "METER", "meter_id": 210}, { "type"
+  // 0100: : "OUTPUT", "port": 1 }, { "type": "SET_FIELD",  "field": "vlan_
+  // 0140: "vid", "value": 8106 }, {"type": "SET_QUEUE", "queue_id": 0 } ] }
+  //
+  // curl --trace-ascii ./curl.trace -X POST -d '{"dpid": 1229782937975278821, "table_id": 30, "idle_timeout": 0, "hard_timeout": 0, "priority": 100, "flags": 0, "match":{"eth_type": 2048, "vlan_vid": 4010,  "nw_dst":"10.10.4.20", "priority":100 }, "actions":[{ "type": "METER", "meter_id": 210}, { "type": "OUTPUT", "port": 1 }, { "type": "SET_FIELD",  "field": "vlan_vid", "value": 8106 }, {"type": "SET_QUEUE", "queue_id": 0 } ] }' http://tango.psc.edu:8080/stats/flowentry/modify
+
+  char path_buf[kURLMaxSize];
+  snprintf(path_buf, kURLMaxSize - 1, "%s/%s/%s",
+           kRyuQueryStats, kRyuQueryFlowentry, kRyuQueryModify);
+  URL query_url;
+  query_url.Init("http", kRyuControllerName, kRyuControllerPort,
+                 path_buf, strlen(path_buf), NULL, 0, NULL);
+  HTTPFraming query_http_hdr;
+  query_http_hdr.InitRequest(HTTPFraming::POST, query_url);
+
+  // Build message-body.
+  char tmp_body[kHTTPMsgBodyMaxSize];
+
+  // Note, eth_type may need to be variable, same with vlan_vid
+  snprintf(tmp_body, kHTTPMsgBodyMaxSize - 1,
+           "{\"dpid\": %s, \"table_id\": 30, \"idle_timeout\": 0, "
+           "\"hard_timeout\": 0, \"priority\": 100, \"flags\": 0, "
+           "\"match\":{\"eth_type\": %d, \"vlan_vid\": %d, "
+           "\"nw_dst\": \"%s\", \"priority\": 100}, "
+           "\"actions\":[{\"type\": \"METER\", \"meter_id\": %d}, "
+           "{\"type\": \"OUTPUT\", \"port\": 1}, "
+           "{\"type\": \"SET_FIELD\", \"field\": \"vlan_vid\", "
+           "\"value\": 8106}, "
+           "{\"type\": \"SET_QUEUE\", \"queue_id\": 0}]}",
+           dpid.c_str(), controller.dl_type_, controller.lan_vlan_,
+           flow_itr->dst_ip_.c_str(), meter.meter_);
+
+  // Add HTTP message-headers (for host, Accept and content type & length).
+  struct rfc822_msg_hdr mime_msg_hdr;
+  mime_msg_hdr.field_name = MIME_HOST;
+  char tmp_value[kURLMaxSize];
+  snprintf(tmp_value, kURLMaxSize - 1, "%s:%hu", 
+           kRyuControllerName, kRyuControllerPort);
+  mime_msg_hdr.field_value = tmp_value;
+  query_http_hdr.AppendMsgHdr(mime_msg_hdr);
+
+#if 0  // Add Accept: */* header
+  mime_msg_hdr.field_name = MIME_ACCEPT;
+  snprintf(tmp_value, kURLMaxSize - 1, "*/*");
+  mime_msg_hdr.field_value = tmp_value;
+  query_http_hdr.AppendMsgHdr(mime_msg_hdr);
+#endif
+
+  mime_msg_hdr.field_name = MIME_CONTENT_TYPE;
+  mime_msg_hdr.field_value = MIME_APP_X_WWW_FORM_URLENCODED;
+  query_http_hdr.AppendMsgHdr(mime_msg_hdr);
+
+  mime_msg_hdr.field_name = MIME_CONTENT_LENGTH;
+  char tmp_buf[64];
+  snprintf(tmp_buf, 64, "%ld", (long)strlen(tmp_body));
+  mime_msg_hdr.field_value = tmp_buf;
+  query_http_hdr.AppendMsgHdr(mime_msg_hdr);
+
+  logger.Log(LOG_NOTICE, "conga_request_stats_flowentry_modify(): Generated HTTP message:\n%s%s", query_http_hdr.print_hdr(0, true).c_str(), tmp_body);  // XXX change to DEBUG
+
+  // Setup opaque MsgHdr for TCPSession, and add HTTP header to it.
+  MsgHdr tmp_msg_hdr(MsgHdr::TYPE_HTTP);
+  tmp_msg_hdr.Init(++msg_id_hash, query_http_hdr);
+  tmp_session.AddMsgBuf(query_http_hdr.print_hdr(0, true).c_str(),
+                        query_http_hdr.hdr_len(true),
+                        tmp_body, query_http_hdr.msg_len(), tmp_msg_hdr);
+  if (error.Event()) {
+    logger.Log(LOG_ERR, "conga_request_stats_flowentry_modify(): "
+               "failed to build msg: %s", error.print().c_str());
+    return allocation_id_cnt;
+  }
+
+  // HACK: Normally, we would add our REQUEST message to our outgoing
+  // TCPSession list (to_peers), and then go back to wait for
+  // transmission in the event-loop, processing the results in
+  // conga_process_response().  However, doing that would require us
+  // to be able to associate the FlowInfo between the two SSL lists
+  // (which might be done via the MsgHdr msg_id!).  So, for now, we're
+  // just going to sequentially turn around and ask the controller for
+  // a response in here, then set the appropriate flag in our
+  // FlowInfo.
+
+  logger.Log(LOG_INFO, "Sending REQUEST: \'%s\n%s\' to %s.", 
+             query_http_hdr.print_start_line(false).c_str(), 
+             query_http_hdr.print_msg_hdrs().c_str(), 
+             tmp_session.SSLConn::print().c_str());
+
+  // Okay, try and connect, then send out our request.
+  tmp_session.Connect();
+  tmp_session.Write();
+  if (error.Event()) {
+    error.AppendMsg("conga_request_stats_flowentry_modify(): ");
+    return allocation_id_cnt;
+  }
+
+  // If we made it here, hang around to get our response ...
+  bool eof = false;
+  ssize_t bytes_read = 0;
+  while (!eof) {
+    bytes_read = tmp_session.Read(&eof);
+    if (error.Event()) {
+      error.AppendMsg("conga_request_stats_flowentry_modify(): ");
+      return allocation_id_cnt;
+    }
+    if (bytes_read > 0) {
+      if (!tmp_session.IsIncomingMsgInitialized())
+        tmp_session.InitIncomingMsg();
+      if (error.Event()) {
+        error.AppendMsg("conga_request_stats_flowentry_modify(): ");
+        return allocation_id_cnt;
+      }
+
+      if (tmp_session.IsIncomingMsgComplete())
+        break;
+    }
+  }
+  tmp_session.Close();
+
+  logger.Log(LOG_DEBUG, "conga_request_stats_flowentry_modify(): Read %ld byte(s) from %s, rbuf_len: %ld, eof: %d.", bytes_read, tmp_session.hostname().c_str(), tmp_session.rbuf_len(), eof);
+
+  // Process the response.
+  if (!tmp_session.IsIncomingMsgInitialized()) {
+    error.Init(EX_DATAERR, "conga_request_stats_flowentry_modify(): "
+               "Not INITIALIZED: Failed to parse response from %s", 
+               tmp_session.hostname().c_str());
+    return allocation_id_cnt;
+  }
+
+  const MsgHdr msg_hdr = tmp_session.rhdr();
+  if (msg_hdr.http_hdr().status_code() != 200) {
+    error.Init(EX_DATAERR, "conga_request_stats_flowentry_modify(): "
+               "Communication failure with %s: %s",
+               tmp_session.hostname().c_str(),
+               tmp_session.rhdr().print().c_str());
+    return allocation_id_cnt;
+  }
+
+  // TODO(aka) Do we need to check for any specific message-headers or body?
+
+  // Set our FlowInfo to show that's now associated with our chosen meter ...
+  flow_itr->meter_ = meter.meter_;
+
+  // ... and generate a unique allocation id.
+  char allocation_id[64];  // assuming no more than 64 digits (64 bits
+                           // ~= 20 digits)
+  snprintf(allocation_id, 64, "%lu", (unsigned long)++allocation_id_cnt);
+  flow_itr->allocation_id_ = allocation_id;
+  flow_itr->expiration_ = flow_itr->duration_;
+  
+  // Head back to main's event-loop to send RESPONSE out.
+  return allocation_id_cnt;
 }
 
 // Routine to encapsulate (frame) the REPONSE ERROR as a standard HTTP

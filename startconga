@@ -1,0 +1,2 @@
+nohup ./server/conga -Lfile=./conga.log:debug -Lstderr:notice -4 -p 13500 -d 172800 1>conga.out &
+

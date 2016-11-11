@@ -273,17 +273,14 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
-    initiate_stats_meter_request(conf_info, switch_itr->first, &to_peers,
-                                 &to_peers_mtx);
+    initiate_stats_meter_request(conf_info, switch_itr->first,
+                                 &to_peers, &to_peers_mtx);
 
     // And while we're at it, issue the onetime request for the
     // meters' maximum rates.
 
-    /*  XXX re-add!!!
-    initiate_stats_meterconfig_request(info, 
-                                       switch_itr->first, switch_itr->second,
-                                       &ssl_context, &to_peers, &to_peers_mtx);
-    */
+    initiate_stats_meterconfig_request(conf_info, switch_itr->first,
+                                       &to_peers, &to_peers_mtx);
     //curl -X GET http://tango.psc.edu:8080/stats/meterconfig/1229782937975278821
     switch_itr++;
   }
@@ -317,7 +314,7 @@ int main(int argc, char* argv[]) {
       snprintf((char*)tmp_str.c_str() + strlen(tmp_str.c_str()),
                1024 - strlen(tmp_str.c_str()), "%s (%s:%d:%d:%d:%s:%s)",
                flow_itr->allocation_id_.c_str(), flow_itr->api_key_.c_str(),
-               flow_itr->meter_, flow_itr->bandwidth_, flow_itr->duration_,
+               flow_itr->meter_, flow_itr->rate_, flow_itr->duration_,
                flow_itr->src_ip_.c_str(), flow_itr->dst_ip_.c_str());
       flow_itr++;
       if (flow_itr != flows.end())
@@ -766,6 +763,9 @@ int main(int argc, char* argv[]) {
           stats_meter_poll += kPollIntervalStatsMeter;
         }  // if (stats_meter_poll <= now) {
 
+#if 0  // XXX Old TIMEOUT-4 that looked for meters that matched our
+       // *match* parameters.  See new TIMEOUT-4 below.
+
         // TIMEOUT-4: See if we need to poll for a flow (to learn meter-id).
 #if DEBUG_MUTEX_LOCK
         warnx("main(timeout): requesting flow list lock.");
@@ -826,6 +826,154 @@ int main(int argc, char* argv[]) {
         warnx("main(timeout): releasing flow list lock.");
 #endif
         pthread_mutex_unlock(&flow_list_mtx);
+#endif  // #if 0
+
+        // TIMEOUT-4: Check what flows have not been associated to a meter.
+        //
+        // Note, in this new version, FlowInfo.polled_ now represents
+        // successful acknowledgement (i.e., 200) from the Ryu
+        // controller after we've requested our *match* parameters be
+        // associated with the chosen meter.
+
+#if DEBUG_MUTEX_LOCK
+        warnx("main(timeout): requesting flow list lock.");
+#endif
+        pthread_mutex_lock(&flow_list_mtx);
+        list<FlowInfo>::iterator flow_itr = flows.begin();
+        while (flow_itr != flows.end()) {
+          if (flow_itr->meter_ <= 0) {
+            printf("XXX flow (%s) has no meter and a requested bandwidth of: %d.\n", flow_itr->allocation_id_.c_str(), (int)flow_itr->rate_);
+
+            // First, figure out the correct switch (based on flow's dst).
+            string tmp_dpid;
+            map<string, SwitchInfo>::iterator switch_itr = switches.begin();
+            while (switch_itr != switches.end()) {
+              list<string> end_hosts = switch_itr->second.end_hosts();
+              list<string>::iterator host_itr = end_hosts.begin();
+              while (host_itr != end_hosts.end()) {
+                // Since hosts are dotted-quad, no need to
+                // transform() to lower-case before compare()!
+
+                if (!flow_itr->dst_ip_.compare(*host_itr))
+                  break;
+                host_itr++;
+              }
+              if (host_itr != end_hosts.end())
+                break;  // nice, found the correct switch
+
+              switch_itr++;  // continue on to look at next switch
+            }  // while (switch_itr != switches.end()) {
+            if (switch_itr == switches.end()) {
+              logger.Log(LOG_WARNING, 
+                         "main(): No DPID found for Flow (%s -> %s).",
+                         flow_itr->src_ip_.c_str(),
+                         flow_itr->dst_ip_.c_str());
+
+              flow_itr++;
+              continue;  // process next flow
+            }
+
+            string dpid = switch_itr->first;  // for convenience, store our dpid
+            //flow_itr->dpid_ = switch_itr->first;  // store our dpid
+
+            // Next, find a meter that we can use (i.e., 0 flow_count,
+            // same dpid, same rate/bandwidth ...
+
+#if DEBUG_MUTEX_LOCK
+            warnx("main(timeout): requesting sdn_state lock.");
+#endif
+            pthread_mutex_lock(&sdn_state_mtx);
+
+            //string tmp_msg(1024, '\0');
+            list<MeterInfo>::iterator meter_itr = sdn_state.begin();
+            while (meter_itr != sdn_state.end()) {
+              printf("XXX main(): checking meter (%d), dpid (%s), rate (%u) to flow dpid (%s), bandwidth (%d).\n", meter_itr->meter_, meter_itr->dpid_.c_str(), (unsigned int)meter_itr->rate_, dpid.c_str(), flow_itr->rate_);
+              if (!meter_itr->dpid_.compare(dpid) &&
+                  meter_itr->rate_ == (uint64_t)flow_itr->rate_ &&
+                  meter_itr->flow_count_ == 0) {
+                flow_itr->meter_ = meter_itr->meter_;
+                break;  // found one
+              }
+
+              meter_itr++;
+            }
+            if (meter_itr == sdn_state.end()) {
+              logger.Log(LOG_ERR, "main(): "
+                         "Failed to find an unsused meter on %s "
+                         "for Flow (%s -> %s).",
+                         dpid.c_str(), flow_itr->src_ip_.c_str(),
+                         flow_itr->dst_ip_.c_str());
+              flow_itr++;
+              continue;  // check next flow
+            }
+
+#if DEBUG_MUTEX_LOCK
+            warnx("main(timeout): releasing sdn_state lock.");
+#endif
+            pthread_mutex_unlock(&sdn_state_mtx);
+
+            // Okay, we have an available meter, let's request the
+            // switch to assign our flow to that meter.
+
+            string err_msg(1024, '\0');
+            allocation_id_cnt = 
+                conga_request_stats_flowentry_modify(conf_info, dpid,
+                                                     switch_itr->second,
+                                                     *meter_itr, now,
+                                                     allocation_id_cnt,
+                                                     &ssl_context,
+                                                     flow_itr);
+            if (error.Event()) {
+              snprintf((char*)err_msg.c_str(), 1024,
+                       "Failed to assign flow dst (%s) to meter (%d) "
+                       "on controller (%s): %s",
+                       flow_itr->dst_ip_.c_str(), meter_itr->meter_,
+                       switch_itr->second.name_.c_str(), error.print().c_str()); 
+              error.clear();
+
+              logger.Log(LOG_NOTICE, "main(timeout): %s", err_msg.c_str());
+
+              // Return rejection and erase flow.
+              initiate_post_allocation_response(conf_info, *flow_itr, err_msg,
+                                                &from_peers,
+                                                &from_peers_mtx);
+              if (error.Event()) {
+                logger.Log(LOG_ERR, "main(timeout): "
+                           "Failed to intialize response to peer: %s",
+                           error.print().c_str());
+                error.clear();
+              }
+
+              flow_itr = flows.erase(flow_itr);
+              flow_info_list_save_state(conf_info.flow_info_list_file_, flows);
+              continue;  // check next flow
+            }
+
+            // Success, so inform the user!
+            initiate_post_allocation_response(conf_info, *flow_itr, err_msg,
+                                              &from_peers,
+                                              &from_peers_mtx);
+            if (error.Event()) {
+              logger.Log(LOG_ERR, "main(timeout): "
+                         "Failed to intialize response to peer: %s",
+                         error.print().c_str());
+              error.clear();
+            }
+
+            flow_info_list_save_state(conf_info.flow_info_list_file_, flows);
+          }  // if (flow_itr->meter_ <= 0) {
+
+          flow_itr++;
+        }  // while (flow_itr != flows.end()) {
+#if DEBUG_MUTEX_LOCK
+        warnx("main(timeout): releasing flow list lock.");
+#endif
+        pthread_mutex_unlock(&flow_list_mtx);
+
+#if 0 // TODO(aka): This timeout's stuff has been moved the last half
+      // of TIMEOUT-4.  Eventually, we need to add this (or some
+      // alternative) throughput test, as opposed to just seeing if we
+      // have a meter available.
 
         // TIMEOUT-5: Check (waiting) flows for meter-ids.
 #if DEBUG_MUTEX_LOCK
@@ -874,7 +1022,7 @@ int main(int argc, char* argv[]) {
 #endif
             pthread_mutex_unlock(&sdn_state_mtx);
 
-            logger.Log(LOG_WARNING, "main(): TODO(aka) Need to substract throughput (%d) from rate (unknown) to see if greater than request (%d)!", throughput, flow_itr->bandwidth_);
+            logger.Log(LOG_WARNING, "main(): TODO(aka) Need to substract throughput (%d) from rate (unknown) to see if greater than request (%d)!", throughput, flow_itr->rate_);
 
             string err_msg(1024, '\0');
             if (1) {  // TODO(aka) if ((throughput + bandwidth) < rate)
@@ -921,6 +1069,7 @@ int main(int argc, char* argv[]) {
         warnx("main(timeout): releasing flow list lock.");
 #endif
         pthread_mutex_unlock(&flow_list_mtx);
+#endif // #if 0
 
         // TIMEOUT-6: Kill off expired authenticators & flows.
 #if DEBUG_MUTEX_LOCK
@@ -970,8 +1119,10 @@ int main(int argc, char* argv[]) {
 
             snprintf((char*)tmp_msg.c_str() + strlen(tmp_msg.c_str()), 
                      1024 - strlen(tmp_msg.c_str()),
-                     "Meter %d (dpid: %s) throughput: %d (%s)", 
+                     "Meter %d (dpid: %s, rate: %lu, flow count: %d) "
+                     "throughput: %d (%s)", 
                      meter_itr->meter_, meter_itr->dpid_.c_str(),
+                     (unsigned long)meter_itr->rate_, meter_itr->flow_count_,
                      throughput, meter_itr->flag_rate_.c_str());
             meter_itr++;
             if (meter_itr == sdn_state.end())

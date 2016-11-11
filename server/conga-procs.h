@@ -17,6 +17,7 @@ using namespace std;
 
 #include "TCPSession.h"
 #include "ConfInfo.h"
+#include "SwitchInfo.h"
 #include "MeterInfo.h"
 #include "AuthInfo.h"
 #include "FlowInfo.h"
@@ -108,6 +109,15 @@ string conga_process_get_allocations(const ConfInfo& info,
                                      list<FlowInfo>* flows,
                                      pthread_mutex_t* flow_list_mtx,
                                      list<TCPSession>::iterator peer);
+
+size_t conga_request_stats_flowentry_modify(const ConfInfo& info,
+                                            const string& dpid,
+                                            const SwitchInfo& controller, 
+                                            const MeterInfo& meter,
+                                            const time_t now,
+                                            size_t allocation_id_cnt,
+                                            SSLContext* ssl_context,
+                                            list<FlowInfo>::iterator flow_itr);
 
 void conga_gen_http_error_response(const ConfInfo& info,
                                    const HTTPFraming& http_hdr, 

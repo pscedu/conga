@@ -8,3 +8,5 @@ conga.out
 *.o
 *.json
 *.trace
+log-post-failure
+nohup.out
